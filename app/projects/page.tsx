@@ -81,6 +81,12 @@ export default function ProjectsPage() {
     setName('')
     setClientId('')
     setMessage('Project saved.')
+    await supabase.from('audit_entries').insert({
+      actor_user_id: userData.user?.id,
+      action: 'project.created',
+      entity_type: 'project',
+      after_value: { project_reference: reference, name, client_id: clientId },
+    })
     await loadProjects()
   }
 
@@ -117,7 +123,10 @@ export default function ProjectsPage() {
         <ul>
           {projects.map((p) => (
             <li key={p.id}>
-              {p.project_reference} — {p.name} (Client: {p.clients?.name ?? 'unknown'}) · Stage: {p.stage} · Status: {p.status}
+              <a href={'/projects/' + p.id} style={{ color: 'blue', textDecoration: 'underline' }}>
+                {p.project_reference} — {p.name}
+              </a>{' '}
+              (Client: {p.clients?.name ?? 'unknown'}) · Stage: {p.stage} · Status: {p.status}
             </li>
           ))}
         </ul>

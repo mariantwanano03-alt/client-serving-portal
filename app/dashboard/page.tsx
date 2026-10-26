@@ -44,6 +44,10 @@ export default function DashboardPage() {
       <h1>Dashboard</h1>
       <p>Welcome, {profile.full_name}</p>
       <p>Role: {profile.role}</p>
+      <nav style={{ marginTop: 20, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+        <a href="/clients" style={{ color: 'blue', textDecoration: 'underline' }}>Clients</a>
+        <a href="/projects" style={{ color: 'blue', textDecoration: 'underline' }}>Projects</a>
+      </nav>
       <button onClick={handleSignOut} style={{ padding: 10, marginTop: 20 }}>
         Sign out
       </button>

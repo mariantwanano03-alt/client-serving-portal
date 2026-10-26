@@ -63,6 +63,13 @@ export default function ClientsPage() {
     setName('')
     setEmail('')
     setMessage('Client saved.')
+    // audit entry
+    await supabase.from('audit_entries').insert({
+      actor_user_id: userData.user?.id,
+      action: 'client.created',
+      entity_type: 'client',
+      after_value: { client_code: code, name, email: email || null },
+    })
     await loadClients()
   }
 
@@ -92,7 +99,10 @@ export default function ClientsPage() {
         <ul>
           {clients.map((c) => (
             <li key={c.id}>
-              {c.client_code} — {c.name} {c.email ? '(' + c.email + ')' : ''}
+              <a href={'/clients/' + c.id} style={{ color: 'blue', textDecoration: 'underline' }}>
+                {c.client_code} — {c.name}
+              </a>{' '}
+              {c.email ? '(' + c.email + ')' : ''}
             </li>
           ))}
         </ul>
