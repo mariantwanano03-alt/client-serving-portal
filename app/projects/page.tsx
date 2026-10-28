@@ -4,6 +4,7 @@ import React, { useEffect, useState, useMemo, useCallback } from 'react'
 import Link from 'next/link'
 import PortalShell, { usePortal } from '@/components/PortalShell'
 import { supabase } from '@/lib/supabase'
+import { approvalBadgeClass, formatApprovalStatus } from '@/lib/roles'
 
 type Client = { id: string; client_code: string; name: string }
 type Project = {
@@ -424,8 +425,8 @@ function ProjectsContent() {
                     </span>
                   </td>
                   <td>
-                    <span className="portal-badge badge-gray">
-                      {project.status}
+                    <span className={approvalBadgeClass(project.status)}>
+                      {formatApprovalStatus(project.status)}
                     </span>
                   </td>
                   <td style={{ textAlign: 'right' }}>

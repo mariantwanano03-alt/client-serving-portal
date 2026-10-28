@@ -124,6 +124,8 @@ export interface Document {
   title: string
   current_revision_id: string | null
   status: string
+  sent_to_client_at: string | null
+  sent_to_client_by: string | null
   created_at: string
 }
 
@@ -132,7 +134,11 @@ export interface DocumentRevision {
   document_id: string
   revision_no: number
   storage_ref: string | null
+  content: string | null
   ai_generated: boolean
+  ai_model: string | null
+  ai_model_version: string | null
+  ai_generated_at: string | null
   created_by: string | null
   created_at: string
   status: string
@@ -241,12 +247,19 @@ export interface ReadinessItem {
   created_at: string
 }
 
+export type AssignmentRole = 'lead' | 'developer'
+
 export interface Assignment {
   id: string
   project_id: string
   developer_user_id: string | null
   assigned_by: string | null
   assigned_at: string
+  assignment_role: AssignmentRole
+  approval_authority: boolean
+  is_active: boolean
+  revoked_at: string | null
+  revoked_by: string | null
 }
 
 export interface Handover {

@@ -5,6 +5,16 @@ import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import PortalShell, { usePortal } from '@/components/PortalShell'
 import { supabase } from '@/lib/supabase'
+import {
+  approvalBadgeClass,
+  canApproveProject,
+  canDraftDeliverables,
+  documentStatusBadgeClass,
+  formatAiOrigin,
+  formatApprovalStatus,
+  formatDocumentStatus,
+  formatLinkStatus,
+} from '@/lib/roles'
 
 type Project = {
   id: string
@@ -74,6 +84,9 @@ type DocumentRecord = {
   title: string
   type: string | null
   status: string
+  current_revision_id?: string | null
+  sent_to_client_at?: string | null
+  sent_to_client_by?: string | null
   created_at?: string
   document_revisions?: DocumentRevision[]
 }
@@ -83,6 +96,11 @@ type DocumentRevision = {
   revision_no: number
   ai_generated: boolean
   status: string
+  content?: string | null
+  storage_ref?: string | null
+  ai_model?: string | null
+  ai_model_version?: string | null
+  ai_generated_at?: string | null
   created_at?: string
 }
 
@@ -90,6 +108,74 @@ type ReadinessCheck = {
   id: string
   result: string | null
   readiness_items?: ReadinessItem[]
+}
+
+function getCurrentRevision(doc: DocumentRecord): DocumentRevision | undefined {
+  return (
+    doc.document_revisions?.find((revision) => revision.id === doc.current_revision_id) ||
+    doc.document_revisions?.[0]
+  )
+}
+
+const AI_ORIGIN_MODEL = 'Portal AI'
+const AI_ORIGIN_VERSION = 'v1'
+
+function formatGeneratedAt(value?: string | null): string {
+  if (!value) return 'Generation time not recorded'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Generation time not recorded'
+  return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+type DiffLine = {
+  type: 'same' | 'added' | 'removed'
+  text: string
+}
+
+function buildLineDiff(previous: string, current: string): DiffLine[] {
+  const before = previous.split('\n')
+  const after = current.split('\n')
+  const table = Array.from({ length: before.length + 1 }, () =>
+    new Array<number>(after.length + 1).fill(0)
+  )
+
+  for (let i = before.length - 1; i >= 0; i -= 1) {
+    for (let j = after.length - 1; j >= 0; j -= 1) {
+      table[i][j] =
+        before[i] === after[j]
+          ? table[i + 1][j + 1] + 1
+          : Math.max(table[i + 1][j], table[i][j + 1])
+    }
+  }
+
+  const lines: DiffLine[] = []
+  let i = 0
+  let j = 0
+
+  while (i < before.length && j < after.length) {
+    if (before[i] === after[j]) {
+      lines.push({ type: 'same', text: before[i] })
+      i += 1
+      j += 1
+    } else if (table[i + 1][j] >= table[i][j + 1]) {
+      lines.push({ type: 'removed', text: before[i] })
+      i += 1
+    } else {
+      lines.push({ type: 'added', text: after[j] })
+      j += 1
+    }
+  }
+
+  while (i < before.length) {
+    lines.push({ type: 'removed', text: before[i] })
+    i += 1
+  }
+  while (j < after.length) {
+    lines.push({ type: 'added', text: after[j] })
+    j += 1
+  }
+
+  return lines
 }
 
 type ReadinessItem = {
@@ -104,6 +190,9 @@ type ReadinessItem = {
 type Assignment = {
   id: string
   developer_user_id: string | null
+  assignment_role: 'lead' | 'developer'
+  approval_authority: boolean
+  is_active: boolean
   assigned_at: string
 }
 
@@ -125,6 +214,7 @@ type Profile = {
   id: string
   full_name: string
   role: string
+  is_active?: boolean
 }
 
 const PROJECT_STAGES = [
@@ -157,7 +247,7 @@ function ProjectDetailInner({ id }: { id: string }) {
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([])
   const [documents, setDocuments] = useState<DocumentRecord[]>([])
   const [readinessCheck, setReadinessCheck] = useState<ReadinessCheck | null>(null)
-  const [assignment, setAssignment] = useState<Assignment | null>(null)
+  const [assignments, setAssignments] = useState<Assignment[]>([])
   const [handover, setHandover] = useState<Handover | null>(null)
   const [devLinks, setDevLinks] = useState<DevLink[]>([])
 
@@ -194,12 +284,15 @@ function ProjectDetailInner({ id }: { id: string }) {
   const [docTitle, setDocTitle] = useState('')
   const [docType, setDocType] = useState('Specification (SOW)')
   const [docAiGenerated, setDocAiGenerated] = useState(false)
+  const [editingDocId, setEditingDocId] = useState<string | null>(null)
+  const [docDraftContent, setDocDraftContent] = useState('')
+  const [docDraftAiGenerated, setDocDraftAiGenerated] = useState(false)
+  const [previewDocId, setPreviewDocId] = useState<string | null>(null)
+  const [docReviewNotes, setDocReviewNotes] = useState('')
 
   const [showHandoverForm, setShowHandoverForm] = useState(false)
   const [handoverSummary, setHandoverSummary] = useState('')
   const [handoverNotes, setHandoverNotes] = useState('')
-
-  const [selectedDeveloperId, setSelectedDeveloperId] = useState('')
 
   const [showAddLink, setShowAddLink] = useState(false)
   const [linkType, setLinkType] = useState('repository')
@@ -207,13 +300,60 @@ function ProjectDetailInner({ id }: { id: string }) {
 
   const [submitting, setSubmitting] = useState(false)
 
-  const canEdit =
-    role === 'senior_dev_pm' ||
-    role === 'administrator' ||
-    profile?.role === 'senior_dev_pm' ||
-    profile?.role === 'administrator' ||
-    (user?.email ? user.email.toLowerCase().includes('senior') : false) ||
-    (user?.email ? user.email.toLowerCase().includes('admin') : false)
+  const effectiveRole = profile?.role || role
+  const leadAssignment = assignments.find(
+    (assignment) => assignment.assignment_role === 'lead' && assignment.is_active
+  )
+  const developerAssignments = assignments.filter(
+    (assignment) => assignment.assignment_role === 'developer' && assignment.is_active
+  )
+  const currentUserAssignment = assignments.find(
+    (assignment) => assignment.developer_user_id === user?.id && assignment.is_active
+  )
+  const canApprove =
+    profile?.is_active !== false &&
+    canApproveProject(effectiveRole, Boolean(currentUserAssignment?.approval_authority))
+  const canDraft = canDraftDeliverables(effectiveRole)
+  const leadProfile = leadAssignment?.developer_user_id
+    ? teamProfiles.find((member) => member.id === leadAssignment.developer_user_id)
+    : undefined
+  const approverNames = assignments
+    .filter((assignment) => assignment.is_active && assignment.approval_authority)
+    .map((assignment) => {
+      const member = teamProfiles.find(
+        (candidate) => candidate.id === assignment.developer_user_id
+      )
+      return member?.is_active !== false ? member?.full_name : undefined
+    })
+    .filter((name): name is string => Boolean(name))
+  const editingDoc = documents.find((doc) => doc.id === editingDocId) || null
+  const editingRevision = editingDoc ? getCurrentRevision(editingDoc) : undefined
+  const editingNextRevisionNo = editingDoc
+    ? (editingDoc.document_revisions ?? []).reduce(
+        (highest, revision) => Math.max(highest, revision.revision_no),
+        0
+      ) + 1
+    : 1
+
+  const previewDoc = documents.find((doc) => doc.id === previewDocId) || null
+  const previewRevision = previewDoc ? getCurrentRevision(previewDoc) : undefined
+  const previewPreviousRevision = previewDoc
+    ? (previewDoc.document_revisions ?? [])
+        .filter((revision) => revision.revision_no < (previewRevision?.revision_no ?? 0))
+        .sort((a, b) => b.revision_no - a.revision_no)[0]
+    : undefined
+  const previewDiff = buildLineDiff(
+    previewPreviousRevision?.content ?? '',
+    previewRevision?.content ?? ''
+  )
+  const previewStatus = previewDoc
+    ? previewDoc.status === 'sent_to_client'
+      ? 'sent_to_client'
+      : previewRevision?.status || previewDoc.status
+    : ''
+  const previewSender = previewDoc?.sent_to_client_by
+    ? teamProfiles.find((profile) => profile.id === previewDoc.sent_to_client_by)
+    : undefined
 
   const refreshAllProjectData = useCallback(async () => {
     try {
@@ -273,7 +413,7 @@ function ProjectDetailInner({ id }: { id: string }) {
       // Documents
       const { data: doc, error: docErr } = await supabase
         .from('documents')
-        .select('id, title, type, status, created_at, document_revisions:document_revisions_document_id_fkey(*)')
+        .select('id, title, type, status, current_revision_id, sent_to_client_at, sent_to_client_by, created_at, document_revisions:document_revisions_document_id_fkey(*)')
         .eq('project_id', id)
         .order('created_at', { ascending: false })
       if (!docErr && doc) {
@@ -290,18 +430,17 @@ function ProjectDetailInner({ id }: { id: string }) {
         .maybeSingle()
       setReadinessCheck((rc ?? null) as ReadinessCheck | null)
 
-      // Assignment
+      // Project assignment matrix
       const { data: asgn } = await supabase
         .from('assignments')
-        .select('id, developer_user_id, assigned_at')
+        .select(
+          'id, developer_user_id, assignment_role, approval_authority, is_active, assigned_at'
+        )
         .eq('project_id', id)
-        .order('assigned_at', { ascending: false })
-        .limit(1)
-        .maybeSingle()
-      if (asgn) {
-        setAssignment(asgn as Assignment)
-        setSelectedDeveloperId(asgn.developer_user_id || '')
-      }
+        .eq('is_active', true)
+        .order('assignment_role', { ascending: false })
+        .order('assigned_at', { ascending: true })
+      setAssignments((asgn ?? []) as Assignment[])
 
       // Handover
       const { data: hov } = await supabase
@@ -330,8 +469,11 @@ function ProjectDetailInner({ id }: { id: string }) {
     let ignore = false
 
     async function loadInitial() {
-      // Load team profiles for assignments
-      const { data: profs } = await supabase.from('profiles').select('id, full_name, role').eq('is_active', true)
+      // Load team profiles for assignment names. Suspended members stay visible
+      // in the read-only matrix so their status is not hidden.
+      const { data: profs } = await supabase
+        .from('profiles')
+        .select('id, full_name, role, is_active')
       if (!ignore && profs) {
         setTeamProfiles(profs as Profile[])
       }
@@ -349,9 +491,27 @@ function ProjectDetailInner({ id }: { id: string }) {
     }
   }, [id, refreshAllProjectData])
 
+  useEffect(() => {
+    if (!previewDocId) return
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setPreviewDocId(null)
+        setDocReviewNotes('')
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [previewDocId])
+
   // Stage Progression Handler
   async function handleAdvanceStage(newStage: string) {
     if (!project) return
+    if (!canApprove) {
+      setStatusMessage({ type: 'error', text: 'Only the project’s assigned approver can advance project stages.' })
+      return
+    }
     const prevStage = project.stage
 
     const { error } = await supabase.from('projects').update({ stage: newStage }).eq('id', project.id)
@@ -387,6 +547,10 @@ function ProjectDetailInner({ id }: { id: string }) {
   // --- Handlers: Discovery & Requirements ---
   async function handleAddDiscovery(e: React.FormEvent) {
     e.preventDefault()
+    if (!canDraft) {
+      setStatusMessage({ type: 'error', text: 'You do not have permission to add discovery notes.' })
+      return
+    }
     if (!discSummary.trim() && !discNotes.trim()) {
       setStatusMessage({ type: 'error', text: 'A summary or detailed notes are required.' })
       return
@@ -414,6 +578,10 @@ function ProjectDetailInner({ id }: { id: string }) {
 
   async function handleAddRequirement(e: React.FormEvent) {
     e.preventDefault()
+    if (!canDraft) {
+      setStatusMessage({ type: 'error', text: 'You do not have permission to add requirements.' })
+      return
+    }
     if (!reqRef.trim() || !reqTitle.trim()) {
       setStatusMessage({ type: 'error', text: 'Ref and title are required.' })
       return
@@ -425,6 +593,7 @@ function ProjectDetailInner({ id }: { id: string }) {
       requirement_ref: cleanRef,
       title: reqTitle.trim(),
       priority: reqPriority,
+      status: 'pending_review',
       created_by: user?.id,
     })
     setSubmitting(false)
@@ -435,7 +604,10 @@ function ProjectDetailInner({ id }: { id: string }) {
     setReqRef('')
     setReqTitle('')
     setShowAddReq(false)
-    setStatusMessage({ type: 'success', text: `Requirement ${cleanRef} created.` })
+    setStatusMessage({
+      type: 'success',
+      text: `Requirement ${cleanRef} submitted for Senior approval.`,
+    })
     await refreshAllProjectData()
   }
 
@@ -531,6 +703,10 @@ function ProjectDetailInner({ id }: { id: string }) {
   }
 
   async function handleConfirmPayment(depositId: string, amount: number) {
+    if (!canApprove) {
+      setStatusMessage({ type: 'error', text: 'Only the project’s assigned approver can confirm payments.' })
+      return
+    }
     if (!window.confirm('Confirm that this payment has cleared and been received?')) return
     setSubmitting(true)
 
@@ -586,6 +762,10 @@ function ProjectDetailInner({ id }: { id: string }) {
   // --- Handlers: Documents & Approvals ---
   async function handleAddDocument(e: React.FormEvent) {
     e.preventDefault()
+    if (!canDraft) {
+      setStatusMessage({ type: 'error', text: 'You do not have permission to draft documents.' })
+      return
+    }
     if (!docTitle.trim()) {
       setStatusMessage({ type: 'error', text: 'Document title is required.' })
       return
@@ -598,7 +778,7 @@ function ProjectDetailInner({ id }: { id: string }) {
         project_id: id,
         title: docTitle.trim(),
         type: docType,
-        status: 'draft',
+        status: 'pending_review',
       })
       .select('id')
       .single()
@@ -609,47 +789,194 @@ function ProjectDetailInner({ id }: { id: string }) {
       return
     }
 
-    // Create initial revision #1
-    const { data: revData } = await supabase
-      .from('document_revisions')
-      .insert({
-        document_id: docData.id,
-        revision_no: 1,
-        ai_generated: docAiGenerated,
-        created_by: user?.id,
-        status: 'pending_review',
-      })
-      .select('id')
-      .single()
-
-    if (revData?.id) {
-      await supabase.from('documents').update({ current_revision_id: revData.id }).eq('id', docData.id)
-    }
-
     setSubmitting(false)
     setDocTitle('')
     setShowAddDoc(false)
-    setStatusMessage({ type: 'success', text: 'Document revision #1 created and queued for review.' })
+    setEditingDocId(docData.id)
+    setDocDraftContent('')
+    setDocDraftAiGenerated(docAiGenerated)
+    setStatusMessage({
+      type: 'success',
+      text: 'Document created. Add the initial draft content below.',
+    })
     await refreshAllProjectData()
   }
 
-  async function handleApproveDocument(docId: string, revisionId: string, decision: 'approved' | 'rejected') {
-    const comment = window.prompt(`Enter review notes for ${decision.toUpperCase()}:`)
-    if (comment === null) return
+  function handleOpenDocument(doc: DocumentRecord) {
+    const revision = getCurrentRevision(doc)
+    setEditingDocId(doc.id)
+    setDocDraftContent(revision?.content ?? '')
+    setDocDraftAiGenerated(Boolean(revision?.ai_generated))
+    setShowAddDoc(false)
+    setStatusMessage(null)
+  }
+
+  async function handleSaveDocumentDraft(e: React.FormEvent) {
+    e.preventDefault()
+    if (!canDraft) {
+      setStatusMessage({
+        type: 'error',
+        text: 'You do not have permission to draft documents.',
+      })
+      return
+    }
+    if (!editingDoc) return
+    if (!docDraftContent.trim()) {
+      setStatusMessage({
+        type: 'error',
+        text: 'Document content is required before submitting a draft.',
+      })
+      return
+    }
 
     setSubmitting(true)
-    await supabase.from('approvals').insert({
+    const nextRevisionNo =
+      (editingDoc.document_revisions ?? []).reduce(
+        (highest, revision) => Math.max(highest, revision.revision_no),
+        0
+      ) + 1
+
+    const { data: revision, error } = await supabase
+      .from('document_revisions')
+      .insert({
+        document_id: editingDoc.id,
+        revision_no: nextRevisionNo,
+        content: docDraftContent.trim(),
+        ai_generated: docDraftAiGenerated,
+        ai_model: docDraftAiGenerated ? AI_ORIGIN_MODEL : null,
+        ai_model_version: docDraftAiGenerated ? AI_ORIGIN_VERSION : null,
+        ai_generated_at: docDraftAiGenerated ? new Date().toISOString() : null,
+        created_by: user?.id,
+        status: 'pending_review',
+      })
+      .select('id, revision_no')
+      .single()
+
+    setSubmitting(false)
+    if (error || !revision) {
+      setStatusMessage({
+        type: 'error',
+        text: 'Could not save the document draft: ' + (error?.message || 'unknown error'),
+      })
+      return
+    }
+
+    setEditingDocId(null)
+    setDocDraftContent('')
+    setStatusMessage({
+      type: 'success',
+      text: `Document draft revision #${revision.revision_no} submitted for Senior approval.`,
+    })
+    await refreshAllProjectData()
+  }
+
+  function handlePreviewDocument(doc: DocumentRecord) {
+    setPreviewDocId(doc.id)
+    setDocReviewNotes('')
+    setEditingDocId(null)
+    setShowAddDoc(false)
+    setStatusMessage(null)
+  }
+
+  function handleClosePreview() {
+    setPreviewDocId(null)
+    setDocReviewNotes('')
+  }
+
+  async function handleApproveDocument(
+    docId: string,
+    revisionId: string,
+    decision: 'approved' | 'rejected',
+    comment: string
+  ) {
+    if (!canApprove) {
+      setStatusMessage({ type: 'error', text: 'Only the project’s assigned approver can approve documents.' })
+      return
+    }
+
+    setSubmitting(true)
+    const { error: approvalError } = await supabase.from('approvals').insert({
       revision_id: revisionId,
       approver_id: user?.id,
       decision,
-      comment,
+      comment: comment.trim() || null,
     })
 
-    await supabase.from('document_revisions').update({ status: decision }).eq('id', revisionId)
-    await supabase.from('documents').update({ status: decision }).eq('id', docId)
+    if (approvalError) {
+      setSubmitting(false)
+      setStatusMessage({ type: 'error', text: 'Could not record approval: ' + approvalError.message })
+      return
+    }
+
+    const { error: revisionError } = await supabase
+      .from('document_revisions')
+      .update({ status: decision })
+      .eq('id', revisionId)
+
+    const { error: documentError } = await supabase
+      .from('documents')
+      .update({ status: decision })
+      .eq('id', docId)
 
     setSubmitting(false)
-    setStatusMessage({ type: 'success', text: `Document revision marked as ${decision}.` })
+    if (revisionError || documentError) {
+      setStatusMessage({
+        type: 'error',
+        text:
+          'Approval was recorded but the document status could not be updated: ' +
+          (revisionError?.message || documentError?.message),
+      })
+      return
+    }
+
+    setDocReviewNotes('')
+    setStatusMessage({
+      type: 'success',
+      text:
+        decision === 'approved'
+          ? 'Document approved and marked Client Ready. You can now send it to the client.'
+          : 'Document revision marked as rejected.',
+    })
+    await refreshAllProjectData()
+  }
+
+  async function handleSendToClient(docId: string) {
+    if (!canApprove) {
+      setStatusMessage({ type: 'error', text: 'Only the project’s assigned approver can send documents to clients.' })
+      return
+    }
+
+    const doc = documents.find((item) => item.id === docId)
+    if (!doc) return
+    if (doc.status !== 'approved') {
+      setStatusMessage({
+        type: 'error',
+        text: 'Approve the current document revision before sending it to the client.',
+      })
+      return
+    }
+
+    if (!window.confirm('Send this document to the client? It will be marked as Sent to Client.')) {
+      return
+    }
+
+    setSubmitting(true)
+    const { error } = await supabase
+      .from('documents')
+      .update({
+        status: 'sent_to_client',
+        sent_to_client_at: new Date().toISOString(),
+        sent_to_client_by: user?.id,
+      })
+      .eq('id', docId)
+
+    setSubmitting(false)
+    if (error) {
+      setStatusMessage({ type: 'error', text: 'Could not send the document: ' + error.message })
+      return
+    }
+
+    setStatusMessage({ type: 'success', text: 'Document marked as Sent to Client.' })
     await refreshAllProjectData()
   }
 
@@ -696,7 +1023,7 @@ function ProjectDetailInner({ id }: { id: string }) {
   }
 
   async function handleToggleReadinessItem(itemId: string, currentResult: string, overridable: boolean) {
-    if (!canEdit) return
+    if (!canApprove) return
 
     let nextResult = currentResult === 'passed' ? 'outstanding' : 'passed'
     let overrideReason = null
@@ -716,26 +1043,6 @@ function ProjectDetailInner({ id }: { id: string }) {
       })
       .eq('id', itemId)
 
-    await refreshAllProjectData()
-  }
-
-  async function handleAssignDeveloper() {
-    if (!selectedDeveloperId) return
-    setSubmitting(true)
-
-    const { error } = await supabase.from('assignments').insert({
-      project_id: id,
-      developer_user_id: selectedDeveloperId,
-      assigned_by: user?.id,
-    })
-
-    setSubmitting(false)
-    if (error) {
-      setStatusMessage({ type: 'error', text: error.message })
-      return
-    }
-
-    setStatusMessage({ type: 'success', text: 'Development lead assigned to project.' })
     await refreshAllProjectData()
   }
 
@@ -761,9 +1068,9 @@ function ProjectDetailInner({ id }: { id: string }) {
   // --- Handlers: Dev Links ---
   async function handleAddDevLink(e: React.FormEvent) {
     e.preventDefault()
-    if (!linkUrl.trim()) return
+    if (!canDraft || !linkUrl.trim()) return
     setSubmitting(true)
-    await supabase.from('development_links').insert({
+    const { error } = await supabase.from('development_links').insert({
       project_id: id,
       link_type: linkType,
       url: linkUrl.trim(),
@@ -771,13 +1078,24 @@ function ProjectDetailInner({ id }: { id: string }) {
     })
     setLinkUrl('')
     setSubmitting(false)
+    if (error) {
+      setStatusMessage({ type: 'error', text: 'Could not record link: ' + error.message })
+      return
+    }
     setShowAddLink(false)
-    setStatusMessage({ type: 'success', text: 'Development link recorded.' })
+    setStatusMessage({
+      type: 'success',
+      text: 'Development link recorded and submitted for Senior verification.',
+    })
     await refreshAllProjectData()
   }
 
   async function handleVerifyLink(linkId: string) {
-    await supabase
+    if (!canApprove) {
+      setStatusMessage({ type: 'error', text: 'Only the project’s assigned approver can verify development links.' })
+      return
+    }
+    const { error } = await supabase
       .from('development_links')
       .update({
         verified: true,
@@ -785,6 +1103,10 @@ function ProjectDetailInner({ id }: { id: string }) {
         verified_at: new Date().toISOString(),
       })
       .eq('id', linkId)
+    if (error) {
+      setStatusMessage({ type: 'error', text: 'Could not verify link: ' + error.message })
+      return
+    }
     setStatusMessage({ type: 'success', text: 'Link verified.' })
     await refreshAllProjectData()
   }
@@ -830,6 +1152,19 @@ function ProjectDetailInner({ id }: { id: string }) {
           </div>
         )}
 
+        {/* Junior Developer boundary notice */}
+        {!loading && project && effectiveRole === 'junior_developer' && (
+          <div className="portal-role-notice" role="note">
+            <span className="portal-role-notice-icon">🔒</span>
+            <div>
+              <strong>Junior Developer draft access.</strong> You can add discovery notes,
+              requirements, document drafts and development links. Approvals, stage changes,
+              payment confirmation and link verification are reserved for this project’s
+              assigned approver.
+            </div>
+          </div>
+        )}
+
         {loading ? (
           <div className="portal-card">
             <div className="portal-empty-state">
@@ -866,24 +1201,42 @@ function ProjectDetailInner({ id }: { id: string }) {
                   )}
                 </div>
 
-                {/* Stage Advance Dropdown for Senior PM */}
-                {canEdit && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ fontSize: 12, color: '#64748b', fontWeight: 600 }}>Stage:</span>
-                    <select
-                      className="form-input"
-                      style={{ width: 'auto', height: 36, fontSize: 12, fontWeight: 600 }}
-                      value={project.stage}
-                      onChange={(e) => handleAdvanceStage(e.target.value)}
-                    >
-                      {PROJECT_STAGES.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
+                {/* Stage Advance Dropdown: editable for Senior PM, read-only for draftees */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 12, color: '#64748b', fontWeight: 600 }}>Stage:</span>
+                  <select
+                    className="form-input"
+                    style={{
+                      width: 'auto',
+                      height: 36,
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: canApprove ? 'pointer' : 'not-allowed',
+                      opacity: canApprove ? 1 : 0.7,
+                    }}
+                    value={project.stage}
+                    onChange={(e) => handleAdvanceStage(e.target.value)}
+                    disabled={!canApprove}
+                    aria-readonly={!canApprove}
+                    title={
+                      canApprove
+                        ? 'Advance the project stage'
+                        : 'Read-only: stage changes require Senior Developer / PM approval'
+                    }
+                  >
+                    {!PROJECT_STAGES.some((s) => s.id === project.stage) && (
+                      <option value={project.stage}>{project.stage.replace(/_/g, ' ')}</option>
+                    )}
+                    {PROJECT_STAGES.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.label}
+                      </option>
+                    ))}
+                  </select>
+                  {!canApprove && (
+                    <span className="portal-badge badge-amber">🔒 Read-only</span>
+                  )}
+                </div>
               </div>
 
               {/* Interactive Visual Stage Stepper */}
@@ -921,15 +1274,26 @@ function ProjectDetailInner({ id }: { id: string }) {
                 </div>
                 <div className="portal-meta-item">
                   <label>Status</label>
-                  <span style={{ textTransform: 'capitalize' }}>{project.status}</span>
+                  <span>
+                    <span className={approvalBadgeClass(project.status)}>
+                      {formatApprovalStatus(project.status)}
+                    </span>
+                  </span>
                 </div>
                 <div className="portal-meta-item">
-                  <label>Developer Lead</label>
+                  <label>Project Lead</label>
                   <span>
-                    {assignment
-                      ? teamProfiles.find((p) => p.id === assignment.developer_user_id)?.full_name || 'Assigned'
-                      : 'Unassigned'}
+                    {leadProfile?.full_name ?? 'Unassigned'}
+                    {leadProfile?.is_active === false && (
+                      <span className="portal-badge badge-amber" style={{ marginLeft: 8 }}>
+                        Suspended
+                      </span>
+                    )}
                   </span>
+                </div>
+                <div className="portal-meta-item">
+                  <label>Approval Authority</label>
+                  <span>{approverNames.length > 0 ? approverNames.join(', ') : 'No approver assigned'}</span>
                 </div>
               </div>
             </div>
@@ -1000,7 +1364,7 @@ function ProjectDetailInner({ id }: { id: string }) {
                       Notes and takeaways from client briefing sessions.
                     </p>
                   </div>
-                  {canEdit && !showAddDiscovery && (
+                  {canDraft && !showAddDiscovery && (
                     <button
                       type="button"
                       className="portal-btn-primary"
@@ -1012,7 +1376,7 @@ function ProjectDetailInner({ id }: { id: string }) {
                   )}
                 </div>
 
-                {showAddDiscovery && canEdit && (
+                {showAddDiscovery && canDraft && (
                   <form onSubmit={handleAddDiscovery} style={{ background: '#f8fafc', padding: 18, borderRadius: 10, marginBottom: 18 }}>
                     <div style={{ display: 'grid', gap: 12 }}>
                       <input type="date" className="form-input" value={discDate} onChange={(e) => setDiscDate(e.target.value)} />
@@ -1058,14 +1422,14 @@ function ProjectDetailInner({ id }: { id: string }) {
                       Prioritized functional and technical scope deliverables.
                     </p>
                   </div>
-                  {canEdit && !showAddReq && (
+                  {canDraft && !showAddReq && (
                     <button type="button" className="portal-btn-primary" style={{ height: 34, fontSize: 12 }} onClick={() => setShowAddReq(true)}>
                       <span>+</span> Add Requirement
                     </button>
                   )}
                 </div>
 
-                {showAddReq && canEdit && (
+                {showAddReq && canDraft && (
                   <form onSubmit={handleAddRequirement} style={{ background: '#f8fafc', padding: 18, borderRadius: 10, marginBottom: 18 }}>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
                       <input className="form-input" placeholder="Ref (e.g. REQ-AUTH-01) *" value={reqRef} onChange={(e) => setReqRef(e.target.value)} required />
@@ -1093,7 +1457,11 @@ function ProjectDetailInner({ id }: { id: string }) {
                         <td><span className="code-badge">{r.requirement_ref}</span></td>
                         <td><strong>{r.title}</strong></td>
                         <td><span className="portal-badge badge-blue">{r.priority}</span></td>
-                        <td><span className="portal-badge badge-gray">{r.status}</span></td>
+                        <td>
+                          <span className={approvalBadgeClass(r.status)}>
+                            {formatApprovalStatus(r.status)}
+                          </span>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -1115,14 +1483,14 @@ function ProjectDetailInner({ id }: { id: string }) {
                         Formal line-item quotes, billing estimates, and commercial status.
                       </p>
                     </div>
-                    {canEdit && !showAddQuote && (
+                    {canApprove && !showAddQuote && (
                       <button type="button" className="portal-btn-primary" style={{ height: 34, fontSize: 12 }} onClick={() => setShowAddQuote(true)}>
                         <span>+</span> New Quotation
                       </button>
                     )}
                   </div>
 
-                  {showAddQuote && canEdit && (
+                  {showAddQuote && canApprove && (
                     <form onSubmit={handleCreateQuotation} style={{ background: '#f8fafc', padding: 20, borderRadius: 12, marginBottom: 20 }}>
                       <h4 style={{ margin: '0 0 14px' }}>Draft Quotation</h4>
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
@@ -1199,7 +1567,7 @@ function ProjectDetailInner({ id }: { id: string }) {
                   ) : (
                     <table className="portal-table">
                       <thead>
-                        <tr><th>Title</th><th>Validity</th><th>Total Value</th><th>Status</th>{canEdit && <th>Action</th>}</tr>
+                        <tr><th>Title</th><th>Validity</th><th>Total Value</th><th>Status</th>{canApprove && <th>Action</th>}</tr>
                       </thead>
                       <tbody>
                         {quotations.map((q) => {
@@ -1218,7 +1586,7 @@ function ProjectDetailInner({ id }: { id: string }) {
                                   {q.status}
                                 </span>
                               </td>
-                              {canEdit && (
+                              {canApprove && (
                                 <td>
                                   {q.status === 'draft' && (
                                     <button
@@ -1259,14 +1627,14 @@ function ProjectDetailInner({ id }: { id: string }) {
                         Required upfront commitments and confirmed payment receipts.
                       </p>
                     </div>
-                    {canEdit && !showAddDeposit && (
+                    {canApprove && !showAddDeposit && (
                       <button type="button" className="portal-btn-primary" style={{ height: 34, fontSize: 12 }} onClick={() => setShowAddDeposit(true)}>
                         <span>+</span> Add Deposit Milestone
                       </button>
                     )}
                   </div>
 
-                  {showAddDeposit && canEdit && (
+                  {showAddDeposit && canApprove && (
                     <form onSubmit={handleAddDeposit} style={{ background: '#f8fafc', padding: 18, borderRadius: 10, marginBottom: 18 }}>
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
                         <input className="form-input" placeholder="Amount (ZAR) *" type="number" value={depAmount} onChange={(e) => setDepAmount(e.target.value)} required />
@@ -1282,7 +1650,7 @@ function ProjectDetailInner({ id }: { id: string }) {
 
                   <table className="portal-table">
                     <thead>
-                      <tr><th>Trigger / Milestone</th><th>Amount</th><th>Due Date</th><th>Status</th>{canEdit && <th>Action</th>}</tr>
+                      <tr><th>Trigger / Milestone</th><th>Amount</th><th>Due Date</th><th>Status</th>{canApprove && <th>Action</th>}</tr>
                     </thead>
                     <tbody>
                       {deposits.map((dep) => (
@@ -1295,7 +1663,7 @@ function ProjectDetailInner({ id }: { id: string }) {
                               {dep.status === 'paid' ? '✓ Paid & Confirmed' : '⏳ Awaiting Payment'}
                             </span>
                           </td>
-                          {canEdit && (
+                          {canApprove && (
                             <td>
                               {dep.status !== 'paid' && (
                                 <button
@@ -1304,7 +1672,7 @@ function ProjectDetailInner({ id }: { id: string }) {
                                   style={{ height: 28, fontSize: 11 }}
                                   onClick={() => handleConfirmPayment(dep.id, dep.amount)}
                                 >
-                                  Confirm Received ✓
+                                  Confirm Payment ✓
                                 </button>
                               )}
                             </td>
@@ -1321,13 +1689,13 @@ function ProjectDetailInner({ id }: { id: string }) {
                     <div>
                       <h3>Client Purchase Orders ({purchaseOrders.length})</h3>
                     </div>
-                    {canEdit && !showAddPO && (
+                    {canApprove && !showAddPO && (
                       <button type="button" className="portal-btn-secondary" style={{ height: 32, fontSize: 12 }} onClick={() => setShowAddPO(true)}>
                         + Record PO
                       </button>
                     )}
                   </div>
-                  {showAddPO && canEdit && (
+                  {showAddPO && canApprove && (
                     <form onSubmit={handleAddPO} style={{ background: '#f8fafc', padding: 16, borderRadius: 10, marginBottom: 16 }}>
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
                         <input className="form-input" placeholder="PO Number (e.g. PO-98124) *" value={poNumber} onChange={(e) => setPoNumber(e.target.value)} required />
@@ -1372,14 +1740,84 @@ function ProjectDetailInner({ id }: { id: string }) {
                       Scope of Work, Architecture Specifications, and Revision Histories.
                     </p>
                   </div>
-                  {canEdit && !showAddDoc && (
-                    <button type="button" className="portal-btn-primary" style={{ height: 34, fontSize: 12 }} onClick={() => setShowAddDoc(true)}>
+                  {canDraft && !showAddDoc && (
+                    <button
+                      type="button"
+                      className="portal-btn-primary"
+                      style={{ height: 34, fontSize: 12 }}
+                      onClick={() => {
+                        setEditingDocId(null)
+                        setShowAddDoc(true)
+                      }}
+                    >
                       <span>+</span> New Document
                     </button>
                   )}
                 </div>
 
-                {showAddDoc && canEdit && (
+                {editingDoc && (
+                  <form
+                    onSubmit={handleSaveDocumentDraft}
+                    style={{ background: '#f8fafc', padding: 18, borderRadius: 10, marginBottom: 18, border: '1px solid #e8ecf3' }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 12 }}>
+                      <div>
+                        <h4 style={{ margin: 0 }}>Draft: {editingDoc.title}</h4>
+                        <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>
+                          {editingRevision ? `Current revision #${editingRevision.revision_no}` : 'No revisions yet'}
+                          {' · '}
+                          {formatDocumentStatus(
+                            editingRevision?.status || editingDoc.status,
+                            Boolean(editingRevision?.ai_generated)
+                          )}
+                          {editingRevision?.storage_ref ? ' · Source file attached' : ''}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="portal-btn-secondary"
+                        style={{ height: 30, fontSize: 12 }}
+                        onClick={() => {
+                          setEditingDocId(null)
+                          setDocDraftContent('')
+                        }}
+                      >
+                        Close
+                      </button>
+                    </div>
+
+                    <textarea
+                      className="form-input"
+                      value={docDraftContent}
+                      onChange={(e) => setDocDraftContent(e.target.value)}
+                      placeholder="Write or paste the initial technical document content here..."
+                      rows={14}
+                      disabled={!canDraft}
+                      style={{ width: '100%', minHeight: 240, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.6 }}
+                    />
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginTop: 12, flexWrap: 'wrap' }}>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#475569', cursor: canDraft ? 'pointer' : 'not-allowed' }}>
+                        <input
+                          type="checkbox"
+                          checked={docDraftAiGenerated}
+                          onChange={(e) => setDocDraftAiGenerated(e.target.checked)}
+                          disabled={!canDraft}
+                        />
+                        🤖 AI-Generated Draft
+                      </label>
+                      {canDraft ? (
+                        <button type="submit" className="portal-btn-primary" disabled={submitting}>
+                          {submitting ? 'Saving...' : `Submit Draft Revision #${editingNextRevisionNo}`}
+                        </button>
+                      ) : (
+                        <span className="portal-badge badge-gray">Read-only</span>
+                      )}
+                    </div>
+                  </form>
+                )}
+
+                {showAddDoc && canDraft && (
                   <form onSubmit={handleAddDocument} style={{ background: '#f8fafc', padding: 18, borderRadius: 10, marginBottom: 18 }}>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
                       <input className="form-input" placeholder="Document Title *" value={docTitle} onChange={(e) => setDocTitle(e.target.value)} required />
@@ -1391,7 +1829,7 @@ function ProjectDetailInner({ id }: { id: string }) {
                       </select>
                       <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#475569', cursor: 'pointer' }}>
                         <input type="checkbox" checked={docAiGenerated} onChange={(e) => setDocAiGenerated(e.target.checked)} />
-                        🤖 AI-Assisted Draft
+                        🤖 AI-Generated Draft
                       </label>
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
@@ -1406,42 +1844,95 @@ function ProjectDetailInner({ id }: { id: string }) {
                 ) : (
                   <table className="portal-table">
                     <thead>
-                      <tr><th>Document Title</th><th>Type</th><th>Revision</th><th>Origin</th><th>Status</th>{canEdit && <th>Sign-off</th>}</tr>
+                      <tr><th>Document Title</th><th>Type</th><th>Revision</th><th>Origin</th><th>Status</th>{canApprove && <th>Sign-off</th>}<th>Action</th></tr>
                     </thead>
                     <tbody>
                       {documents.map((doc) => {
-                        const rev = doc.document_revisions?.[0]
+                        const rev = getCurrentRevision(doc)
+                        const effectiveStatus =
+                          doc.status === 'sent_to_client' ? 'sent_to_client' : rev?.status || doc.status
                         return (
                           <tr key={doc.id}>
-                            <td><strong>{doc.title}</strong></td>
-                            <td><span className="portal-badge badge-gray">{doc.type}</span></td>
-                            <td><span className="code-badge">Rev {rev?.revision_no || 1}</span></td>
                             <td>
-                              {rev?.ai_generated ? (
-                                <span className="portal-badge badge-purple">🤖 AI Assisted</span>
+                              <button
+                                type="button"
+                                className="portal-table-link"
+                                style={{ background: 'none', border: 0, padding: 0, fontFamily: 'inherit', fontSize: 'inherit', cursor: 'pointer', textAlign: 'left' }}
+                                onClick={() => handlePreviewDocument(doc)}
+                              >
+                                {doc.title}
+                              </button>
+                            </td>
+                            <td><span className="portal-badge badge-gray">{doc.type}</span></td>
+                            <td><span className="code-badge">{rev ? `Rev ${rev.revision_no}` : 'No revision'}</span></td>
+                            <td>
+                              {!rev ? (
+                                <span className="portal-badge badge-gray">—</span>
+                              ) : rev.ai_generated ? (
+                                <span
+                                  className="portal-badge badge-purple"
+                                  title={`Generated ${formatGeneratedAt(rev.ai_generated_at || rev.created_at)}`}
+                                >
+                                  🤖 AI Origin · {formatAiOrigin(rev.ai_model, rev.ai_model_version)}
+                                </span>
                               ) : (
                                 <span className="portal-badge badge-gray">✍️ Manual</span>
                               )}
                             </td>
                             <td>
-                              <span className={`portal-badge ${doc.status === 'approved' ? 'badge-green' : 'badge-amber'}`}>
-                                {doc.status}
+                              <span className={documentStatusBadgeClass(effectiveStatus)}>
+                                {formatDocumentStatus(effectiveStatus, Boolean(rev?.ai_generated))}
                               </span>
                             </td>
-                            {canEdit && (
+                            {canApprove && (
                               <td>
-                                {doc.status !== 'approved' && rev && (
+                                {doc.status === 'sent_to_client' ? (
+                                  <span className="portal-badge badge-blue">Sent</span>
+                                ) : effectiveStatus === 'approved' ? (
                                   <button
                                     type="button"
                                     className="portal-btn-primary"
                                     style={{ height: 28, fontSize: 11 }}
-                                    onClick={() => handleApproveDocument(doc.id, rev.id, 'approved')}
+                                    onClick={() => handleSendToClient(doc.id)}
                                   >
-                                    Approve ✓
+                                    Send to Client
                                   </button>
+                                ) : rev ? (
+                                  <button
+                                    type="button"
+                                    className="portal-btn-primary"
+                                    style={{ height: 28, fontSize: 11 }}
+                                    onClick={() => handlePreviewDocument(doc)}
+                                  >
+                                    Review
+                                  </button>
+                                ) : (
+                                  <span className="portal-badge badge-gray">No draft</span>
                                 )}
                               </td>
                             )}
+                            <td>
+                              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                <button
+                                  type="button"
+                                  className="portal-btn-secondary"
+                                  style={{ height: 28, fontSize: 11 }}
+                                  onClick={() => handlePreviewDocument(doc)}
+                                >
+                                  Preview
+                                </button>
+                                {canDraft && (
+                                  <button
+                                    type="button"
+                                    className="portal-btn-secondary"
+                                    style={{ height: 28, fontSize: 11 }}
+                                    onClick={() => handleOpenDocument(doc)}
+                                  >
+                                    Draft
+                                  </button>
+                                )}
+                              </div>
+                            </td>
                           </tr>
                         )
                       })}
@@ -1465,7 +1956,7 @@ function ProjectDetailInner({ id }: { id: string }) {
                         Mandatory compliance check before promoting project to Development.
                       </p>
                     </div>
-                    {!readinessCheck && canEdit && (
+                    {!readinessCheck && canApprove && (
                       <button type="button" className="portal-btn-primary" style={{ height: 34, fontSize: 12 }} onClick={handleInitializeReadiness}>
                         <span>⚙</span> Run Readiness Check
                       </button>
@@ -1475,7 +1966,7 @@ function ProjectDetailInner({ id }: { id: string }) {
                   {!readinessCheck ? (
                     <div className="portal-empty-state">
                       <p className="portal-empty-title">Readiness checklist has not been generated</p>
-                      {canEdit && (
+                      {canApprove && (
                         <button type="button" className="portal-btn-primary" onClick={handleInitializeReadiness}>
                           Generate Readiness Check
                         </button>
@@ -1484,7 +1975,7 @@ function ProjectDetailInner({ id }: { id: string }) {
                   ) : (
                     <table className="portal-table">
                       <thead>
-                        <tr><th>Criterion</th><th>Classification</th><th>Result</th>{canEdit && <th>Toggle</th>}</tr>
+                        <tr><th>Criterion</th><th>Classification</th><th>Result</th>{canApprove && <th>Toggle</th>}</tr>
                       </thead>
                       <tbody>
                         {(readinessCheck.readiness_items || []).map((item) => (
@@ -1515,7 +2006,7 @@ function ProjectDetailInner({ id }: { id: string }) {
                                 {item.result === 'passed' ? '✓ Passed' : item.result === 'overridden' ? '⚠️ Overridden' : '⏳ Outstanding'}
                               </span>
                             </td>
-                            {canEdit && (
+                            {canApprove && (
                               <td>
                                 <button
                                   type="button"
@@ -1534,50 +2025,111 @@ function ProjectDetailInner({ id }: { id: string }) {
                   )}
                 </div>
 
-                {/* Developer Assignment & Handover Dossier */}
+                {/* Project Team & Handover Dossier */}
                 <div className="portal-card">
                   <div className="portal-card-header">
                     <div>
-                      <h3>Developer Assignment & Handover</h3>
+                      <h3>Project Team & Handover</h3>
                       <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>
-                        Assign responsible development engineer and file handover dossier.
+                        Staffing and approval delegation are managed by an Administrator; file the
+                        handover dossier here.
                       </p>
                     </div>
                   </div>
 
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 20 }}>
-                    {/* Developer Assignment Box */}
+                    {/* Read-only Assignment Matrix */}
                     <div style={{ border: '1px solid #e8ecf3', padding: 18, borderRadius: 10 }}>
-                      <h4 style={{ margin: '0 0 10px' }}>Development Lead Assignment</h4>
+                      <h4 style={{ margin: '0 0 10px' }}>Project Team & Approval Authority</h4>
                       <p style={{ fontSize: 12, color: '#64748b', marginBottom: 12 }}>
-                        Select the primary software engineer accountable for delivery:
+                        Project staffing and approval delegation are controlled from the Admin
+                        console.
                       </p>
-                      <div style={{ display: 'flex', gap: 8 }}>
-                        <select
-                          className="form-input"
-                          value={selectedDeveloperId}
-                          onChange={(e) => setSelectedDeveloperId(e.target.value)}
-                          disabled={!canEdit}
-                        >
-                          <option value="">— Select Developer —</option>
-                          {teamProfiles.map((p) => (
-                            <option key={p.id} value={p.id}>
-                              {p.full_name} ({p.role})
-                            </option>
-                          ))}
-                        </select>
-                        {canEdit && (
-                          <button
-                            type="button"
-                            className="portal-btn-primary"
-                            style={{ height: 40 }}
-                            onClick={handleAssignDeveloper}
-                            disabled={submitting || !selectedDeveloperId}
-                          >
-                            Assign
-                          </button>
-                        )}
+
+                      <div style={{ display: 'grid', gap: 10 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center' }}>
+                          <span style={{ fontSize: 12, color: '#64748b' }}>Lead Senior Dev / PM</span>
+                          <strong style={{ fontSize: 13, color: '#14213d' }}>
+                            {leadProfile?.full_name ?? 'Unassigned'}
+                          </strong>
+                        </div>
+
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center' }}>
+                          <span style={{ fontSize: 12, color: '#64748b' }}>
+                            Junior developers report to
+                          </span>
+                          <strong style={{ fontSize: 13, color: '#14213d' }}>
+                            {leadProfile?.full_name ?? 'No lead assigned'}
+                          </strong>
+                        </div>
+
+                        <div>
+                          <span style={{ display: 'block', fontSize: 12, color: '#64748b', marginBottom: 6 }}>
+                            Assigned Developers
+                          </span>
+                          {developerAssignments.length === 0 ? (
+                            <p style={{ margin: 0, fontSize: 12, color: '#94a3b8' }}>
+                              No developers assigned.
+                            </p>
+                          ) : (
+                            <div style={{ display: 'grid', gap: 6 }}>
+                              {developerAssignments.map((assignment) => {
+                                const member = teamProfiles.find(
+                                  (candidate) => candidate.id === assignment.developer_user_id
+                                )
+                                return (
+                                  <div
+                                    key={assignment.id}
+                                    style={{
+                                      display: 'flex',
+                                      justifyContent: 'space-between',
+                                      alignItems: 'center',
+                                      gap: 8,
+                                      padding: '6px 8px',
+                                      borderRadius: 8,
+                                      background: '#f8fafc',
+                                    }}
+                                  >
+                                    <span style={{ fontSize: 12, color: '#334155' }}>
+                                      {member?.full_name ?? 'Unknown member'}
+                                    </span>
+                                    <span
+                                      className={`portal-badge ${
+                                        member?.is_active === false
+                                          ? 'badge-amber'
+                                          : assignment.approval_authority
+                                          ? 'badge-green'
+                                          : 'badge-gray'
+                                      }`}
+                                    >
+                                      {member?.is_active === false
+                                        ? 'Suspended'
+                                        : assignment.approval_authority
+                                        ? 'Approval authority'
+                                        : 'Delivery only'}
+                                    </span>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          )}
+                        </div>
                       </div>
+
+                      {effectiveRole === 'administrator' && (
+                        <Link
+                          href="/admin"
+                          className="portal-btn-secondary"
+                          style={{
+                            marginTop: 12,
+                            textDecoration: 'none',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                          }}
+                        >
+                          Manage assignments in Admin →
+                        </Link>
+                      )}
                     </div>
 
                     {/* Handover Dossier Box */}
@@ -1599,7 +2151,7 @@ function ProjectDetailInner({ id }: { id: string }) {
                           <p style={{ fontSize: 12, color: '#64748b', marginBottom: 10 }}>
                             Prepare technical instructions and scope summary for development kickoff.
                           </p>
-                          {canEdit && !showHandoverForm && (
+                          {canApprove && !showHandoverForm && (
                             <button type="button" className="portal-btn-secondary" onClick={() => setShowHandoverForm(true)}>
                               + Prepare Handover
                             </button>
@@ -1607,7 +2159,7 @@ function ProjectDetailInner({ id }: { id: string }) {
                         </div>
                       )}
 
-                      {showHandoverForm && canEdit && (
+                      {showHandoverForm && canApprove && (
                         <form onSubmit={handleSaveHandover} style={{ marginTop: 12, display: 'grid', gap: 10 }}>
                           <input className="form-input" placeholder="Scope Summary" value={handoverSummary} onChange={(e) => setHandoverSummary(e.target.value)} required />
                           <textarea className="form-input" placeholder="Key technical instructions..." value={handoverNotes} onChange={(e) => setHandoverNotes(e.target.value)} />
@@ -1632,14 +2184,14 @@ function ProjectDetailInner({ id }: { id: string }) {
                   <div>
                     <h3>Development Links & Repositories ({devLinks.length})</h3>
                   </div>
-                  {!showAddLink && (
+                  {canDraft && !showAddLink && (
                     <button type="button" className="portal-btn-primary" style={{ height: 34, fontSize: 12 }} onClick={() => setShowAddLink(true)}>
                       <span>+</span> Record Link
                     </button>
                   )}
                 </div>
 
-                {showAddLink && (
+                {showAddLink && canDraft && (
                   <form onSubmit={handleAddDevLink} style={{ background: '#f8fafc', padding: 16, borderRadius: 10, marginBottom: 16 }}>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
                       <select className="form-input" value={linkType} onChange={(e) => setLinkType(e.target.value)}>
@@ -1658,18 +2210,22 @@ function ProjectDetailInner({ id }: { id: string }) {
                 )}
 
                 <table className="portal-table">
-                  <thead><tr><th>Type</th><th>URL</th><th>Status</th>{canEdit && <th>Action</th>}</tr></thead>
+                  <thead><tr><th>Type</th><th>URL</th><th>Status</th>{canApprove && <th>Action</th>}</tr></thead>
                   <tbody>
                     {devLinks.map((l) => (
                       <tr key={l.id}>
                         <td><span className="portal-badge badge-gray">{l.link_type}</span></td>
                         <td><a href={l.url} target="_blank" rel="noreferrer" className="portal-table-link">{l.url} ↗</a></td>
-                        <td><span className={`portal-badge ${l.verified ? 'badge-green' : 'badge-amber'}`}>{l.verified ? '✓ Verified' : '⏳ Unverified'}</span></td>
-                        {canEdit && (
+                        <td>
+                          <span className={`portal-badge ${l.verified ? 'badge-green' : 'badge-amber'}`}>
+                            {formatLinkStatus(l.verified)}
+                          </span>
+                        </td>
+                        {canApprove && (
                           <td>
                             {!l.verified && (
                               <button type="button" className="portal-btn-primary" style={{ height: 26, fontSize: 11 }} onClick={() => handleVerifyLink(l.id)}>
-                                Verify ✓
+                                Verify Link ✓
                               </button>
                             )}
                           </td>
@@ -1681,6 +2237,188 @@ function ProjectDetailInner({ id }: { id: string }) {
               </div>
             )}
           </>
+        )}
+
+        {previewDoc && (
+            <div
+              className="portal-drawer-overlay"
+              role="presentation"
+              onClick={handleClosePreview}
+            >
+              <aside
+                className="portal-drawer"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="document-preview-title"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <header className="portal-drawer-header">
+                  <div>
+                    <div className="portal-drawer-eyebrow">
+                      <span className="code-badge">{previewDoc.type || 'Document'}</span>
+                      <span className={documentStatusBadgeClass(previewStatus)}>
+                        {formatDocumentStatus(previewStatus, Boolean(previewRevision?.ai_generated))}
+                      </span>
+                    </div>
+                    <h2 id="document-preview-title">{previewDoc.title}</h2>
+                    <p className="portal-drawer-meta">
+                      {previewRevision
+                        ? `Revision #${previewRevision.revision_no} · ${formatDocumentStatus(
+                            previewRevision.status,
+                            Boolean(previewRevision.ai_generated)
+                          )}`
+                        : 'No revision drafted yet'}
+                      {previewDoc.sent_to_client_at
+                        ? ` · Sent ${formatGeneratedAt(previewDoc.sent_to_client_at)}${
+                            previewSender ? ` by ${previewSender.full_name}` : ''
+                          }`
+                        : ''}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="portal-drawer-close"
+                    aria-label="Close document preview"
+                    onClick={handleClosePreview}
+                  >
+                    ×
+                  </button>
+                </header>
+
+                <div className="portal-drawer-body">
+                  {previewRevision?.ai_generated && (
+                    <div className="portal-ai-origin">
+                      <span className="portal-badge badge-purple">🤖 AI Origin</span>
+                      <span className="portal-ai-origin-model">
+                        {formatAiOrigin(previewRevision.ai_model, previewRevision.ai_model_version)}
+                      </span>
+                      <span className="portal-ai-origin-time">
+                        Generated {formatGeneratedAt(previewRevision.ai_generated_at || previewRevision.created_at)}
+                      </span>
+                    </div>
+                  )}
+
+                  <section className="portal-drawer-section">
+                    <div className="portal-drawer-section-header">
+                      <h3>Document Content</h3>
+                      {previewRevision?.storage_ref && (
+                        <a
+                          className="portal-table-link"
+                          href={previewRevision.storage_ref}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Attached source file ↗
+                        </a>
+                      )}
+                    </div>
+                    {previewRevision?.content ? (
+                      <pre className="portal-document-preview">{previewRevision.content}</pre>
+                    ) : (
+                      <div className="portal-drawer-empty">
+                        <p>No content stored for this revision.</p>
+                        {canDraft && (
+                          <p>Use <strong>Edit Draft</strong> to add the initial content.</p>
+                        )}
+                      </div>
+                    )}
+                  </section>
+
+                  <section className="portal-drawer-section">
+                    <h3>Review Diff</h3>
+                    {!previewPreviousRevision ? (
+                      <p className="portal-drawer-muted">
+                        Initial revision — there is no earlier revision to compare.
+                      </p>
+                    ) : !previewPreviousRevision.content ? (
+                      <p className="portal-drawer-muted">
+                        Revision #{previewPreviousRevision.revision_no} has no stored content to compare.
+                      </p>
+                    ) : (
+                      <div className="portal-diff" aria-label="Line-by-line document changes">
+                        {previewDiff.map((line, index) => (
+                          <div
+                            key={`${line.type}-${index}`}
+                            className={`portal-diff-line ${line.type}`}
+                          >
+                            <span className="portal-diff-marker">
+                              {line.type === 'added' ? '+' : line.type === 'removed' ? '−' : ' '}
+                            </span>
+                            <span className="portal-diff-text">{line.text || ' '}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+
+                  {canApprove && (
+                    <section className="portal-drawer-section">
+                      <h3>Senior Review Notes</h3>
+                      <textarea
+                        className="form-input"
+                        rows={4}
+                        value={docReviewNotes}
+                        onChange={(event) => setDocReviewNotes(event.target.value)}
+                        placeholder="Record what you reviewed, any edits made, and any conditions before client delivery..."
+                      />
+                    </section>
+                  )}
+                </div>
+
+                <footer className="portal-drawer-footer">
+                  <p className="portal-drawer-muted">
+                    {previewRevision?.ai_generated
+                      ? 'AI-generated draft · internal approval is required before client delivery.'
+                      : 'Internal document review and client delivery.'}
+                  </p>
+                  <div className="portal-drawer-actions">
+                    <button type="button" className="portal-btn-secondary" onClick={handleClosePreview}>
+                      Close
+                    </button>
+                    {canDraft && (
+                      <button
+                        type="button"
+                        className="portal-btn-secondary"
+                        onClick={() => {
+                          handleClosePreview()
+                          handleOpenDocument(previewDoc)
+                        }}
+                      >
+                        Edit Draft
+                      </button>
+                    )}
+                    {canApprove && previewRevision && previewDoc.status !== 'sent_to_client' && (
+                      previewDoc.status === 'approved' ? (
+                        <button
+                          type="button"
+                          className="portal-btn-primary"
+                          onClick={() => handleSendToClient(previewDoc.id)}
+                          disabled={submitting}
+                        >
+                          Send to Client
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="portal-btn-primary"
+                          onClick={() =>
+                            handleApproveDocument(
+                              previewDoc.id,
+                              previewRevision.id,
+                              'approved',
+                              docReviewNotes
+                            )
+                          }
+                          disabled={submitting}
+                        >
+                          {submitting ? 'Approving...' : 'Approve ✓'}
+                        </button>
+                      )
+                    )}
+                  </div>
+                </footer>
+              </aside>
+            </div>
         )}
       </div>
   )
