@@ -31,6 +31,9 @@ export default async function Home() {
           <Link href="/projects" className="nav-link">
             <span>▤</span> Projects
           </Link>
+          <Link href="/admin" className="nav-link">
+            <span>⚙</span> Admin
+          </Link>
           <Link href="/login" className="nav-link">
             <span>↗</span> Sign in
           </Link>

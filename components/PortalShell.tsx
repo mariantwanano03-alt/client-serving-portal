@@ -72,7 +72,8 @@ export default function PortalShell({
       const { data: userData, error: userError } = await supabase.auth.getUser()
 
       if (userError || !userData.user) {
-        router.replace('/login')
+        const next = `${window.location.pathname}${window.location.search}`
+        router.replace(`/login?next=${encodeURIComponent(next)}`)
         return
       }
 
@@ -109,7 +110,8 @@ export default function PortalShell({
         if (!isMounted) return
 
         if (userError || !userData.user) {
-          router.replace('/login')
+          const next = `${window.location.pathname}${window.location.search}`
+          router.replace(`/login?next=${encodeURIComponent(next)}`)
           return
         }
 
@@ -208,7 +210,7 @@ export default function PortalShell({
     >
       <main className="dashboard-shell">
         <aside className="dashboard-sidebar">
-          <Link href="/" className="dashboard-brand">
+          <Link href="/dashboard" className="dashboard-brand">
             <span className="brand-icon">C</span>
             <span>
               <strong>ClientFlow</strong>
@@ -244,7 +246,7 @@ export default function PortalShell({
               <span>⚙</span> Admin
             </Link>
             <Link
-              href="/"
+              href="/dashboard"
               className={`dashboard-nav-link ${isHomeActive ? 'selected' : ''}`}
             >
               <span>⌂</span> Home

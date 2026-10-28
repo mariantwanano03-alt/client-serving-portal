@@ -76,14 +76,25 @@ function DashboardContent() {
           <span className="dashboard-card-action">View projects →</span>
         </Link>
 
-        <Link href="/" className="dashboard-feature-card">
+        <Link
+          href={profile?.role === 'administrator' ? '/admin' : '/dashboard'}
+          className="dashboard-feature-card"
+        >
           <div className="dashboard-feature-top">
-            <span className="dashboard-feature-icon home-tone">⌂</span>
+            <span className="dashboard-feature-icon home-tone">
+              {profile?.role === 'administrator' ? '⚙' : '⌂'}
+            </span>
             <span className="dashboard-card-arrow">↗</span>
           </div>
-          <h3>Home</h3>
-          <p>Return to the Client Serving Portal home page.</p>
-          <span className="dashboard-card-action">Go to home →</span>
+          <h3>{profile?.role === 'administrator' ? 'Admin' : 'Overview'}</h3>
+          <p>
+            {profile?.role === 'administrator'
+              ? 'Manage users, project assignments and audit history.'
+              : 'Return to your workspace overview.'}
+          </p>
+          <span className="dashboard-card-action">
+            {profile?.role === 'administrator' ? 'Open admin →' : 'Go to overview →'}
+          </span>
         </Link>
       </section>
     </>

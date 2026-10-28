@@ -51,7 +51,16 @@ export default function LoginPage() {
         return
       }
 
-      router.push('/dashboard')
+      const nextParam = new URLSearchParams(window.location.search).get('next')
+      const destination =
+        nextParam &&
+        nextParam.startsWith('/') &&
+        !nextParam.startsWith('//') &&
+        !nextParam.startsWith('/login')
+          ? nextParam
+          : '/dashboard'
+
+      router.push(destination)
     } catch (err: unknown) {
       const msg =
         err instanceof Error ? err.message : 'An unexpected error occurred during sign-in.'
