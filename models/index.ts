@@ -213,6 +213,9 @@ export interface Deposit {
   due_date: string | null
   trigger: string | null
   status: string
+  external_reference: string | null
+  verified_at: string | null
+  verified_by_provider: string | null
   created_at: string
 }
 
@@ -224,6 +227,13 @@ export interface PaymentConfirmation {
   payment_date: string | null
   reference: string | null
   confirmed_by: string | null
+  provider: string | null
+  external_reference: string | null
+  external_event_id: string | null
+  actor_type: string
+  actor_label: string | null
+  verified_at: string
+  payload: unknown
   created_at: string
 }
 

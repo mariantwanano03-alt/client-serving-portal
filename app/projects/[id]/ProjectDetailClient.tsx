@@ -69,6 +69,22 @@ type Deposit = {
   due_date: string | null
   trigger: string | null
   status: string
+  external_reference?: string | null
+  verified_at?: string | null
+  verified_by_provider?: string | null
+}
+
+type PaymentConfirmation = {
+  id: string
+  deposit_id: string | null
+  amount: number
+  reference: string | null
+  provider: string | null
+  external_reference: string | null
+  actor_type: string | null
+  confirmed_by: string | null
+  verified_at: string | null
+  created_at: string
 }
 
 type PurchaseOrder = {
@@ -124,6 +140,13 @@ function formatGeneratedAt(value?: string | null): string {
   if (!value) return 'Generation time not recorded'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return 'Generation time not recorded'
+  return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+function formatVerifiedAt(value?: string | null): string {
+  if (!value) return 'Time not recorded'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Time not recorded'
   return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 }
 
@@ -244,6 +267,7 @@ function ProjectDetailInner({ id }: { id: string }) {
   const [requirements, setRequirements] = useState<Requirement[]>([])
   const [quotations, setQuotations] = useState<Quotation[]>([])
   const [deposits, setDeposits] = useState<Deposit[]>([])
+  const [paymentConfirmations, setPaymentConfirmations] = useState<PaymentConfirmation[]>([])
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([])
   const [documents, setDocuments] = useState<DocumentRecord[]>([])
   const [readinessCheck, setReadinessCheck] = useState<ReadinessCheck | null>(null)
@@ -326,6 +350,15 @@ function ProjectDetailInner({ id }: { id: string }) {
       return member?.is_active !== false ? member?.full_name : undefined
     })
     .filter((name): name is string => Boolean(name))
+  const confirmationByDeposit = useMemo(() => {
+    const byDeposit = new Map<string, PaymentConfirmation>()
+    for (const confirmation of paymentConfirmations) {
+      if (confirmation.deposit_id && !byDeposit.has(confirmation.deposit_id)) {
+        byDeposit.set(confirmation.deposit_id, confirmation)
+      }
+    }
+    return byDeposit
+  }, [paymentConfirmations])
   const editingDoc = documents.find((doc) => doc.id === editingDocId) || null
   const editingRevision = editingDoc ? getCurrentRevision(editingDoc) : undefined
   const editingNextRevisionNo = editingDoc
@@ -397,10 +430,22 @@ function ProjectDetailInner({ id }: { id: string }) {
       // Deposits
       const { data: dep } = await supabase
         .from('deposits')
-        .select('id, amount, currency, due_date, trigger, status')
+        .select(
+          'id, amount, currency, due_date, trigger, status, external_reference, verified_at, verified_by_provider'
+        )
         .eq('project_id', id)
         .order('created_at', { ascending: false })
       setDeposits((dep ?? []) as Deposit[])
+
+      // External payment confirmations (written by the payment webhook)
+      const { data: confirmations } = await supabase
+        .from('payment_confirmations')
+        .select(
+          'id, deposit_id, amount, reference, provider, external_reference, actor_type, confirmed_by, verified_at, created_at'
+        )
+        .eq('project_id', id)
+        .order('created_at', { ascending: false })
+      setPaymentConfirmations((confirmations ?? []) as PaymentConfirmation[])
 
       // POs
       const { data: po } = await supabase
@@ -699,37 +744,6 @@ function ProjectDetailInner({ id }: { id: string }) {
     setDepAmount('')
     setShowAddDeposit(false)
     setStatusMessage({ type: 'success', text: 'Milestone deposit recorded.' })
-    await refreshAllProjectData()
-  }
-
-  async function handleConfirmPayment(depositId: string, amount: number) {
-    if (!canApprove) {
-      setStatusMessage({ type: 'error', text: 'Only the project’s assigned approver can confirm payments.' })
-      return
-    }
-    if (!window.confirm('Confirm that this payment has cleared and been received?')) return
-    setSubmitting(true)
-
-    // Mark deposit as paid
-    await supabase.from('deposits').update({ status: 'paid' }).eq('id', depositId)
-
-    const refCode = `REC-${depositId.slice(0, 8).toUpperCase()}`
-    const { error } = await supabase.from('payment_confirmations').insert({
-      project_id: id,
-      deposit_id: depositId,
-      amount,
-      payment_date: new Date().toISOString().split('T')[0],
-      reference: refCode,
-      confirmed_by: user?.id,
-    })
-
-    setSubmitting(false)
-    if (error) {
-      setStatusMessage({ type: 'error', text: error.message })
-      return
-    }
-
-    setStatusMessage({ type: 'success', text: 'Payment confirmed and receipt logged.' })
     await refreshAllProjectData()
   }
 
@@ -1650,37 +1664,71 @@ function ProjectDetailInner({ id }: { id: string }) {
 
                   <table className="portal-table">
                     <thead>
-                      <tr><th>Trigger / Milestone</th><th>Amount</th><th>Due Date</th><th>Status</th>{canApprove && <th>Action</th>}</tr>
+                      <tr><th>Trigger / Milestone</th><th>Amount</th><th>Due Date</th><th>Status</th><th>External Verification</th></tr>
                     </thead>
                     <tbody>
-                      {deposits.map((dep) => (
-                        <tr key={dep.id}>
-                          <td><strong>{dep.trigger || 'Milestone Deposit'}</strong></td>
-                          <td><strong>{dep.currency} {Number(dep.amount).toLocaleString()}</strong></td>
-                          <td>{dep.due_date || 'On Signing'}</td>
-                          <td>
-                            <span className={`portal-badge ${dep.status === 'paid' ? 'badge-green' : 'badge-amber'}`}>
-                              {dep.status === 'paid' ? '✓ Paid & Confirmed' : '⏳ Awaiting Payment'}
-                            </span>
-                          </td>
-                          {canApprove && (
+                      {deposits.map((dep) => {
+                        const confirmation = confirmationByDeposit.get(dep.id)
+                        const legacyManual = confirmation?.actor_type === 'legacy_manual'
+                        const legacyVerifier = confirmation?.confirmed_by
+                          ? teamProfiles.find((member) => member.id === confirmation.confirmed_by)
+                              ?.full_name
+                          : undefined
+                        return (
+                          <tr key={dep.id}>
+                            <td><strong>{dep.trigger || 'Milestone Deposit'}</strong></td>
+                            <td><strong>{dep.currency} {Number(dep.amount).toLocaleString()}</strong></td>
+                            <td>{dep.due_date || 'On Signing'}</td>
                             <td>
-                              {dep.status !== 'paid' && (
-                                <button
-                                  type="button"
-                                  className="portal-btn-primary"
-                                  style={{ height: 28, fontSize: 11 }}
-                                  onClick={() => handleConfirmPayment(dep.id, dep.amount)}
-                                >
-                                  Confirm Payment ✓
-                                </button>
+                              <span className={`portal-badge ${dep.status === 'paid' ? 'badge-green' : 'badge-amber'}`}>
+                                {dep.status === 'paid' ? '✓ Paid & Confirmed' : '⏳ Awaiting External Verification'}
+                              </span>
+                            </td>
+                            <td>
+                              {confirmation ? (
+                                <div style={{ display: 'grid', gap: 2 }}>
+                                  <strong style={{ fontSize: 12, color: '#334155' }}>
+                                    {legacyManual
+                                      ? 'Legacy manual confirmation'
+                                      : confirmation.provider || dep.verified_by_provider || 'External payment feed'}
+                                  </strong>
+                                  <span style={{ fontSize: 11, color: '#64748b' }}>
+                                    Ref: {confirmation.external_reference || confirmation.reference || dep.external_reference || '—'}
+                                  </span>
+                                  <span style={{ fontSize: 11, color: '#94a3b8' }}>
+                                    {legacyManual ? 'Recorded' : 'Verified'}{' '}
+                                    {formatVerifiedAt(confirmation.verified_at || dep.verified_at || confirmation.created_at)}
+                                    {legacyManual && legacyVerifier ? ` by ${legacyVerifier}` : ''}
+                                  </span>
+                                </div>
+                              ) : dep.status === 'paid' ? (
+                                <span style={{ fontSize: 11, color: '#64748b' }}>
+                                  Ref: {dep.external_reference || '—'}
+                                </span>
+                              ) : (
+                                <span className="portal-badge badge-gray">Awaiting webhook</span>
                               )}
                             </td>
-                          )}
-                        </tr>
-                      ))}
+                          </tr>
+                        )
+                      })}
                     </tbody>
                   </table>
+
+                  <div
+                    style={{
+                      marginTop: 12,
+                      padding: '10px 12px',
+                      background: '#f8fafc',
+                      border: '1px solid #e2e8f0',
+                      borderRadius: 8,
+                      fontSize: 12,
+                      color: '#64748b',
+                    }}
+                  >
+                    Payment confirmations are verified automatically by the external accounting
+                    webhook. Manual confirmation is disabled.
+                  </div>
                 </div>
 
                 {/* Purchase Orders */}

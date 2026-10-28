@@ -1367,6 +1367,7 @@ function AdminContent() {
               <option value="client">Clients</option>
               <option value="project">Projects</option>
               <option value="quotation">Quotations</option>
+              <option value="payment_confirmation">Payments</option>
               <option value="profile">Profiles / Users</option>
             </select>
           </div>
