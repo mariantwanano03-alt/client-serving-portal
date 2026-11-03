@@ -10,7 +10,7 @@ DB_NAME="postgres"
 
 echo ""
 echo "╔══════════════════════════════════════════════════════╗"
-echo "║       ClientFlow — Applying DB Fix Migrations        ║"
+echo "║       Client Serving Portal — Applying DB Fix Migrations        ║"
 echo "╚══════════════════════════════════════════════════════╝"
 echo ""
 

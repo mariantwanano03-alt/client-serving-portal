@@ -1,16 +1,20 @@
 'use client'
 
-import React, { useState } from 'react'
-import { useRouter } from 'next/navigation'
+import React, { Suspense, useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { supabase } from '@/lib/supabase'
 
-export default function LoginPage() {
+function LoginPageContent() {
   const router = useRouter()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
+  // Present when the SessionGuard ended a suspended user's open session and
+  // redirected them here (?suspended=1).
+  const searchParams = useSearchParams()
+  const suspendedNotice = searchParams.get('suspended') === '1'
 
   async function handleSignIn(e: React.FormEvent) {
     e.preventDefault()
@@ -47,8 +51,31 @@ export default function LoginPage() {
       }
 
       if (res?.error) {
-        setErrorMessage(res.error.message)
+        setErrorMessage(
+          /banned/i.test(res.error.message)
+            ? 'This account is suspended. Please contact an administrator.'
+            : res.error.message
+        )
         return
+      }
+
+      // PRD BR-01: only authenticated, ACTIVE internal users may access the
+      // portal. Auth-level bans are enforced by Supabase, but an account
+      // merely flagged is_active=false in the profiles table (e.g. suspended
+      // before ban enforcement) must be signed back out here.
+      const { data: sessionData } = await supabase.auth.getSession()
+      const userId = sessionData.session?.user.id
+      if (userId) {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('is_active')
+          .eq('id', userId)
+          .maybeSingle()
+        if (profile && profile.is_active === false) {
+          await supabase.auth.signOut()
+          setErrorMessage('This account is suspended. Please contact an administrator.')
+          return
+        }
       }
 
       const nextParam = new URLSearchParams(window.location.search).get('next')
@@ -76,8 +103,8 @@ export default function LoginPage() {
       <div className="auth-card">
         <div className="auth-brand">
           <div className="auth-brand-icon">C</div>
-          <span className="auth-brand-name">ClientFlow</span>
-          <span className="auth-brand-tagline">Client Serving Portal</span>
+          <span className="auth-brand-name">Client Serving Portal</span>
+          <span className="auth-brand-tagline">Client Delivery Portal</span>
         </div>
 
         <div className="auth-heading">
@@ -86,6 +113,13 @@ export default function LoginPage() {
         </div>
 
         <form onSubmit={handleSignIn} className="auth-form">
+          {suspendedNotice && (
+            <div className="auth-alert-error" role="alert">
+              <span>🔒</span>
+              <div>Your session was ended because this account is suspended. Please contact an administrator.</div>
+            </div>
+          )}
+
           {errorMessage && (
             <div className="auth-alert-error" role="alert">
               <span>⚠️</span>
@@ -147,10 +181,19 @@ export default function LoginPage() {
             <span>←</span> Back to overview
           </Link>
           <span className="auth-security-note">
-            Protected workspace · ClientFlow v1.0
+            Protected workspace · Client Serving Portal v1.0
           </span>
         </div>
       </div>
     </main>
+  )
+}
+
+// useSearchParams requires a Suspense boundary for static prerendering.
+export default function LoginPage() {
+  return (
+    <Suspense fallback={null}>
+      <LoginPageContent />
+    </Suspense>
   )
 }

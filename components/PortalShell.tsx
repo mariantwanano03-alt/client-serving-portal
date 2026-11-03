@@ -166,7 +166,7 @@ export default function PortalShell({
       <main className="dashboard-loading">
         <div className="loading-card">
           <div className="loading-mark">C</div>
-          <h2>ClientFlow</h2>
+          <h2>Client Serving Portal</h2>
           <p>{message}</p>
           {message.startsWith('Could not') && (
             <button
@@ -213,8 +213,8 @@ export default function PortalShell({
           <Link href="/dashboard" className="dashboard-brand">
             <span className="brand-icon">C</span>
             <span>
-              <strong>ClientFlow</strong>
-              <small>Serving Portal</small>
+              <strong>Client Serving Portal</strong>
+              <small>Client Delivery Portal</small>
             </span>
           </Link>
 
@@ -294,8 +294,8 @@ export default function PortalShell({
           <div className="portal-page-body">{children}</div>
 
           <footer className="dashboard-footer">
-            <span>ClientFlow</span>
-            <span>Client Serving Portal · All in one workspace</span>
+            <span>Client Serving Portal</span>
+            <span>All in one workspace</span>
           </footer>
         </section>
       </main>

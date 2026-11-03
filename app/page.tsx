@@ -11,8 +11,8 @@ export default async function Home() {
         <Link href="/" className="brand">
           <span className="brand-icon">C</span>
           <span>
-            <strong>ClientFlow</strong>
-            <small>Serving Portal</small>
+            <strong>Client Serving Portal</strong>
+            <small>Client Delivery Portal</small>
           </span>
         </Link>
 
@@ -45,7 +45,7 @@ export default async function Home() {
             <p>We&apos;re here to help you keep things moving.</p>
             <Link href="/login">Get started →</Link>
           </div>
-          <p className="sidebar-footer">ClientFlow · Workspace</p>
+          <p className="sidebar-footer">Client Serving Portal · Workspace</p>
         </div>
       </aside>
 
@@ -130,8 +130,8 @@ export default async function Home() {
         </section>
 
         <footer className="page-footer">
-          <span>ClientFlow</span>
-          <span>Client Serving Portal · All in one workspace</span>
+          <span>Client Serving Portal</span>
+          <span>All in one workspace</span>
         </footer>
       </section>
     </main>

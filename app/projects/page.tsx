@@ -138,6 +138,12 @@ function ProjectsContent() {
       project_reference: cleanRef,
       client_id: clientId,
       name: cleanName,
+      // New projects start at Discovery (PROJ-02). Set explicitly so the
+      // correct stage is stored even before the DB default migration runs.
+      stage: 'discovery',
+      // A project created by the Senior Developer / PM starts as a Draft —
+      // it only enters the review flow once it is submitted for approval.
+      status: 'draft',
       created_by: user?.id,
     })
 
