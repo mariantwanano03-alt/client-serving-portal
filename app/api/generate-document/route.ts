@@ -29,7 +29,7 @@ export async function POST(req: Request) {
     // 2. Fetch Approved Discovery Transcripts
     const { data: discoveries } = await supabaseAdmin
       .from('discovery_records')
-      .select('summary, notes, transcript')
+      .select('summary, notes, transcript_ref')
       .eq('project_id', projectId)
       .eq('status', 'approved'); 
 
@@ -38,7 +38,7 @@ export async function POST(req: Request) {
     }
 
     const discoveryContext = discoveries.map(d => 
-      `Summary: ${d.summary || 'N/A'}\nNotes: ${d.notes || 'N/A'}\nTranscript: ${d.transcript || 'N/A'}`
+      `Summary: ${d.summary || 'N/A'}\nNotes: ${d.notes || 'N/A'}\nTranscript: ${d.transcript_ref || 'N/A'}`
     ).join('\n\n---\n\n');
 
     // 3. Fetch existing generated documents to use as context
@@ -221,6 +221,18 @@ export async function POST(req: Request) {
       });
 
     if (revErr) throw new Error('Failed to save document content: ' + revErr.message);
+
+    const { error: auditError } = await supabaseAdmin.from('audit_entries').insert({
+      actor_user_id: null,
+      action: 'document.ai_generated',
+      entity_type: 'document',
+      entity_id: docData.id,
+      project_id: projectId,
+      before_value: { status: documentType === 'prompt_md' ? 'approved' : 'pending_review' },
+      after_value: { document_type: documentType, revision_no: 1, ai_model: 'Groq GPT-OSS-120B', status: documentType === 'prompt_md' ? 'approved' : 'pending_review' },
+    });
+
+    if (auditError) throw new Error('Failed to save audit entry: ' + auditError.message);
 
     return NextResponse.json({ success: true, documentId: docData.id });
   } catch (error: any) {

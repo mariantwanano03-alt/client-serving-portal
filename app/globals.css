@@ -8,6 +8,11 @@
   --blue: #4361ee;
   --muted: #778198;
   --border: #e8ecf3;
+  --surface: #ffffff;
+  --surface-hover: #f8fafc;
+  --text-primary: #18243a;
+  --text-secondary: #64748b;
+  --accent: #4361ee;
 }
 
 @theme inline {
@@ -15,6 +20,64 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+}
+
+.dark {
+  --background: #0f172a;
+  --foreground: #f1f5f9;
+  --navy: #0f172a;
+  --blue: #6366f1;
+  --muted: #94a3b8;
+  --border: #334155;
+  --surface: #1e293b;
+  --surface-hover: #2d3748;
+  --text-primary: #f8fafc;
+  --text-secondary: #cbd5e1;
+  --accent: #818cf8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    --background: #0f172a;
+    --foreground: #f1f5f9;
+    --navy: #0f172a;
+    --blue: #6366f1;
+    --muted: #94a3b8;
+    --border: #334155;
+    --surface: #1e293b;
+    --surface-hover: #2d3748;
+    --text-primary: #f8fafc;
+    --text-secondary: #cbd5e1;
+    --accent: #818cf8;
+  }
+}
+
+[data-theme="dark"] {
+  --background: #0f172a;
+  --foreground: #f1f5f9;
+  --navy: #0f172a;
+  --blue: #6366f1;
+  --muted: #94a3b8;
+  --border: #334155;
+  --surface: #1e293b;
+  --surface-hover: #2d3748;
+  --text-primary: #f8fafc;
+  --text-secondary: #cbd5e1;
+  --accent: #818cf8;
+}
+
+[data-theme="light"] {
+  --background: #f5f7fb;
+  --foreground: #18243a;
+  --navy: #14213d;
+  --blue: #4361ee;
+  --muted: #778198;
+  --border: #e8ecf3;
+  --surface: #ffffff;
+  --surface-hover: #f8fafc;
+  --text-primary: #18243a;
+  --text-secondary: #64748b;
+  --accent: #4361ee;
 }
 
 * {
@@ -2370,4 +2433,449 @@ a {
     padding-left: 16px;
     padding-right: 16px;
   }
+}
+
+/* ==========================================================================
+   Settings Page
+   ========================================================================== */
+
+.settings-page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.settings-tabs {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1.5px solid var(--border);
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+
+.settings-tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #64748b;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1.5px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.settings-tab-btn:hover {
+  color: #14213d;
+}
+
+.settings-tab-btn.active {
+  color: #4361ee;
+  border-bottom-color: #4361ee;
+}
+
+.settings-section {
+  margin-bottom: 32px;
+}
+
+.settings-section-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.settings-section-header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: #14213d;
+}
+
+.settings-section-header p {
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.settings-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 24px;
+  box-shadow: 0 2px 6px rgba(20, 33, 61, 0.04);
+}
+
+.settings-field {
+  margin-bottom: 20px;
+}
+
+.settings-field label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  margin-bottom: 8px;
+}
+
+.settings-input {
+  width: 100%;
+  height: 44px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1.5px solid #e2e8f0;
+  background: #fff;
+  color: #0f172a;
+  font-size: 14px;
+  transition: all 0.2s ease;
+}
+
+.settings-input:focus {
+  outline: none;
+  border-color: #4361ee;
+  background: #ffffff;
+  box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.15);
+}
+
+.settings-field-phone {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-field-phone .country-code {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 60px;
+  height: 44px;
+  padding: 0 14px;
+  border: 1.5px solid #e2e8f0;
+  border-right: none;
+  border-radius: 10px 0 0 10px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 14px;
+}
+
+.settings-field-phone .settings-input {
+  border-left: none;
+  border-radius: 0 10px 10px 0;
+  padding-left: 12px;
+}
+
+.settings-field-phone .settings-input:focus {
+  border-left-color: #4361ee;
+  border-right-color: #4361ee;
+  border-color: #4361ee;
+}
+
+[data-theme="dark"] .settings-field-phone .country-code,
+.dark .settings-field-phone .country-code {
+  background: var(--surface-hover);
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
+[data-theme="dark"] .settings-field-phone .settings-input,
+.dark .settings-field-phone .settings-input {
+  background: var(--surface-hover);
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+
+[data-theme="dark"] .settings-field-phone .settings-input:focus,
+.dark .settings-field-phone .settings-input:focus {
+  border-left-color: var(--accent);
+  border-right-color: var(--accent);
+  border-color: var(--accent);
+}
+
+.settings-field-help {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.settings-select {
+  width: 100%;
+  height: 44px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1.5px solid #e2e8f0;
+  background: #fff;
+  color: #0f172a;
+  font-size: 14px;
+  transition: all 0.2s ease;
+}
+
+.settings-select:focus {
+  outline: none;
+  border-color: #4361ee;
+  box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.15);
+}
+
+.settings-field.settings-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 0;
+  border-bottom: 1px solid #e8ecf3;
+}
+
+.settings-field.settings-toggle:last-child {
+  border-bottom: none;
+}
+
+.settings-field.settings-toggle label {
+  margin: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.settings-field.settings-toggle label span:first-child {
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.settings-field.settings-toggle label span:last-child {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.settings-toggle {
+  width: 44px;
+  height: 24px;
+  border-radius: 12px;
+  border: 1.5px solid #cbd5e1;
+  background: #e2e8f0;
+  position: relative;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.settings-toggle:checked {
+  background: #4361ee;
+  border-color: #4361ee;
+}
+
+.settings-toggle:checked::before {
+  left: calc(100% - 2px);
+  transform: translateX(-100%);
+}
+
+.settings-toggle::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.2s ease;
+}
+
+.settings-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: 8px;
+  background: #4361ee;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.settings-btn-primary:hover:not(:disabled) {
+  background: #3651d4;
+  transform: translateY(-1px);
+}
+
+.settings-btn-primary:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.settings-btn-primary svg {
+  width: 16px;
+  height: 16px;
+}
+
+.settings-status {
+  padding: 12px 16px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-status.success {
+  background: #f0fdf4;
+  color: #065f46;
+  border: 1px solid #bbf7d0;
+}
+
+.settings-status.error {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+
+.settings-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 24px;
+  color: #64748b;
+}
+
+.settings-empty span {
+  font-size: 48px;
+  margin-bottom: 12px;
+}
+
+.settings-empty p {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1e293b;
+  margin: 0;
+}
+
+.settings-field .settings-input:disabled,
+.settings-field .settings-select:disabled {
+  background: #f1f5f9;
+  cursor: not-allowed;
+}
+
+.settings-btn-primary:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+/* Role badge in settings */
+.role-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.role-badge.junior_developer {
+  background: #eef2ff;
+  color: #3730a3;
+  border: 1px solid #c7d2fe;
+}
+
+.role-badge.senior_dev_pm {
+  background: #faf5ff;
+  color: #6b21a8;
+  border: 1px solid #e9d5ff;
+}
+
+.role-badge.administrator {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+
+/* Theme selector */
+.theme-selector {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.theme-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 20px;
+  border-radius: 12px;
+  border: 1.5px solid #e2e8f0;
+  background: #fff;
+  color: #0f172a;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.theme-option:hover {
+  border-color: #4361ee;
+  background: #f8fafc;
+}
+
+.theme-option.active {
+  border-color: #4361ee;
+  background: #eef2ff;
+  color: #4361ee;
+}
+
+.theme-indicator {
+  font-size: 24px;
+  margin-bottom: 4px;
+}
+
+/* Dark mode adjustments for settings */
+[data-theme="dark"] .settings-card,
+.dark .settings-card {
+  background: var(--surface);
+  border-color: var(--border);
+}
+
+[data-theme="dark"] .settings-input,
+.dark .settings-input {
+  background: var(--surface-hover);
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+
+[data-theme="dark"] .settings-select,
+.dark .settings-select {
+  background: var(--surface-hover);
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+
+[data-theme="dark"] .theme-option,
+.dark .theme-option {
+  background: var(--surface-hover);
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+
+[data-theme="dark"] .settings-empty p,
+.dark .settings-empty p {
+  color: var(--text-secondary);
+}
+
+/* Admin grid for company settings */
+.settings-card .settings-field label {
+  color: var(--text-secondary);
+}
+
+/* Ensure buttons look good in dark mode */
+[data-theme="dark"] .settings-btn-primary,
+.dark .settings-btn-primary {
+  background: var(--accent);
+  color: var(--text-primary);
 }

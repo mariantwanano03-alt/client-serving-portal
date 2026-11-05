@@ -4,13 +4,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import PortalShell, { usePortal, formatRole } from '@/components/PortalShell'
 import { supabase } from '@/lib/supabase'
-import {
-  approvalBadgeClass,
-  documentStatusBadgeClass,
-  formatAiOrigin,
-  formatApprovalStatus,
-  formatDocumentStatus,
-} from '@/lib/roles'
+import { documentStatusBadgeClass, formatAiOrigin, formatDocumentStatus } from '@/lib/roles'
 
 type Profile = {
   id: string
@@ -18,6 +12,7 @@ type Profile = {
   role: 'administrator' | 'senior_dev_pm' | 'junior_developer'
   is_active: boolean
   created_at?: string
+  deleted_at?: string
 }
 
 type AuditEntry = {
@@ -28,15 +23,6 @@ type AuditEntry = {
   entity_id: string | null
   before_value: unknown
   after_value: unknown
-  created_at: string
-}
-
-type Client = {
-  id: string
-  client_code: string
-  name: string
-  email: string | null
-  phone: string | null
   created_at: string
 }
 
@@ -87,7 +73,7 @@ type AssignmentRow = {
   revoked_at: string | null
 }
 
-type AdminTab = 'portfolio' | 'assignments' | 'users' | 'audit'
+type AdminTab = 'users' | 'assignments' | 'audit' | 'payments'
 
 const PENDING_DOC_STATUSES = new Set([
   'draft',
@@ -96,6 +82,34 @@ const PENDING_DOC_STATUSES = new Set([
   'submitted',
   'awaiting_review',
 ])
+
+type Deposit = {
+  id: string
+  project_id: string
+  amount: number
+  currency: string
+  due_date: string | null
+  trigger: string | null
+  status: string
+  external_reference?: string | null
+  verified_at?: string | null
+  verified_by_provider?: string | null
+}
+
+type PaymentConfirmation = {
+  id: string
+  project_id: string
+  deposit_id: string | null
+  amount: number
+  currency: string
+  reference: string | null
+  provider: string | null
+  external_reference: string | null
+  actor_type: string | null
+  confirmed_by: string | null
+  verified_at: string | null
+  created_at: string
+}
 
 function getCurrentRevision(doc: DocumentRow): Revision | undefined {
   const revisions = doc.document_revisions ?? []
@@ -138,13 +152,14 @@ export default function AdminPage() {
 function AdminContent() {
   const { role, user } = usePortal()
 
-  const [activeTab, setActiveTab] = useState<AdminTab>('portfolio')
+  const [activeTab, setActiveTab] = useState<AdminTab>('users')
   const [profiles, setProfiles] = useState<Profile[]>([])
-  const [clients, setClients] = useState<Client[]>([])
   const [projects, setProjects] = useState<Project[]>([])
   const [documents, setDocuments] = useState<DocumentRow[]>([])
   const [assignments, setAssignments] = useState<AssignmentRow[]>([])
   const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([])
+  const [deposits, setDeposits] = useState<Deposit[]>([])
+  const [paymentConfirmations, setPaymentConfirmations] = useState<PaymentConfirmation[]>([])
   const [loading, setLoading] = useState(true)
   const [searchUser, setSearchUser] = useState('')
   const [auditFilter, setAuditFilter] = useState('all')
@@ -168,24 +183,26 @@ function AdminContent() {
     if (showSpinner) setLoading(true)
 
     try {
-      const [profsRes, clientsRes, projectsRes, docsRes, assignmentsRes, auditsRes] =
+      const [profsRes, projectsRes, docsRes, assignmentsRes, auditsRes, depositsRes, confirmationsRes] =
         await Promise.all([
           supabase.from('profiles').select('id, full_name, role, is_active, created_at').order('created_at', { ascending: false }),
-          supabase.from('clients').select('id, client_code, name, email, phone, created_at').order('name'),
           supabase.from('projects').select('id, project_reference, name, stage, status, client_id, created_at, clients(client_code, name)').order('created_at', { ascending: false }),
           supabase.from('documents').select('id, project_id, title, type, status, current_revision_id, sent_to_client_at, created_at, projects(project_reference, name), document_revisions:document_revisions_document_id_fkey(id, revision_no, content, status, ai_generated, ai_model, ai_model_version, ai_generated_at, created_at)').order('created_at', { ascending: false }),
           supabase.from('assignments').select('id, project_id, developer_user_id, assignment_role, approval_authority, is_active, assigned_at, revoked_at').eq('is_active', true).order('assigned_at', { ascending: true }),
           supabase.from('audit_entries').select('*').order('created_at', { ascending: false }).limit(100),
+          supabase.from('deposits').select('id, project_id, amount, currency, due_date, trigger, status, external_reference, verified_at, verified_by_provider').order('created_at', { ascending: false }),
+          supabase.from('payment_confirmations').select('id, project_id, deposit_id, amount, currency, reference, provider, external_reference, actor_type, confirmed_by, verified_at, created_at').order('created_at', { ascending: false }),
         ])
 
-      const errors = [profsRes.error, clientsRes.error, projectsRes.error, docsRes.error, assignmentsRes.error, auditsRes.error].filter(Boolean)
+      const errors = [profsRes.error, projectsRes.error, docsRes.error, assignmentsRes.error, auditsRes.error, depositsRes.error, confirmationsRes.error].filter(Boolean)
 
       if (profsRes.data) setProfiles(profsRes.data as Profile[])
-      if (clientsRes.data) setClients(clientsRes.data as Client[])
       if (projectsRes.data) setProjects(projectsRes.data as unknown as Project[])
       if (docsRes.data) setDocuments(docsRes.data as unknown as DocumentRow[])
       if (assignmentsRes.data) setAssignments(assignmentsRes.data as AssignmentRow[])
       if (auditsRes.data) setAuditEntries(auditsRes.data as AuditEntry[])
+      if (depositsRes.data) setDeposits(depositsRes.data as Deposit[])
+      if (confirmationsRes.data) setPaymentConfirmations(confirmationsRes.data as PaymentConfirmation[])
 
       if (errors.length > 0) {
         setStatusMessage({ type: 'error', text: 'Some governance records could not be loaded: ' + errors[0]?.message })
@@ -235,17 +252,7 @@ function AdminContent() {
     return map
   }, [assignments])
 
-  const projectCountByClient = useMemo(() => {
-    const map = new Map<string, number>()
-    projects.forEach((project) => { map.set(project.client_id, (map.get(project.client_id) ?? 0) + 1) })
-    return map
-  }, [projects])
-
-  const documentCountByProject = useMemo(() => {
-    const map = new Map<string, number>()
-    documents.forEach((document) => { map.set(document.project_id, (map.get(document.project_id) ?? 0) + 1) })
-    return map
-  }, [documents])
+  const projectRefById = useMemo(() => new Map(projects.map((p) => [p.id, p.project_reference])), [projects])
 
   const activeSeniorOptions = useMemo(() => profiles.filter((profile) => profile.is_active && profile.role === 'senior_dev_pm'), [profiles])
   const activeTeamOptions = useMemo(() => profiles.filter((profile) => profile.is_active && (profile.role === 'junior_developer' || profile.role === 'senior_dev_pm')), [profiles])
@@ -255,9 +262,13 @@ function AdminContent() {
   const previewRevision = previewDoc ? getCurrentRevision(previewDoc) : undefined
 
   const filteredUsers = useMemo(() => {
-    if (!searchUser.trim()) return profiles
+    if (!searchUser.trim()) return profiles.filter((p) => !p.deleted_at)
     const q = searchUser.toLowerCase()
-    return profiles.filter((profile) => profile.full_name.toLowerCase().includes(q) || profile.role.toLowerCase().includes(q))
+    return profiles.filter(
+      (profile) =>
+        !profile.deleted_at &&
+        (profile.full_name.toLowerCase().includes(q) || profile.role.toLowerCase().includes(q))
+    )
   }, [profiles, searchUser])
 
   const filteredAudits = useMemo(() => {
@@ -268,18 +279,35 @@ function AdminContent() {
   async function handleCreateUser(e: React.FormEvent) {
     e.preventDefault()
     if (!isAdmin) return
+
+    // Client-side validation
+    if (!newUserForm.full_name || !newUserForm.email || !newUserForm.password || !newUserForm.role) {
+      setStatusMessage({ type: 'error', text: 'All fields are required.' })
+      setSubmitting(false)
+      return
+    }
+    if (newUserForm.password.length < 6) {
+      setStatusMessage({ type: 'error', text: 'Password must be at least 6 characters.' })
+      setSubmitting(false)
+      return
+    }
+
     setSubmitting(true)
     try {
-      // Forward the admin's Supabase access token so the route can verify
-      // that only Administrators create accounts.
       const { data: sessionData } = await supabase.auth.getSession()
       const accessToken = sessionData.session?.access_token ?? ''
+      if (!accessToken) {
+        setSubmitting(false)
+        setStatusMessage({ type: 'error', text: 'No active session. Please sign in again.' })
+        return
+      }
       const response = await fetch('/api/admin/create-user', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
         body: JSON.stringify(newUserForm)
       })
       const data = await response.json()
+      console.log('create-user response:', response.status, data)
       if (!response.ok) throw new Error(data.error || 'Failed to create user')
       setStatusMessage({ type: 'success', text: `✓ User created — ${newUserForm.full_name} has been added to the Workspace Team Directory.` })
       setIsAddUserModalOpen(false)
@@ -324,6 +352,30 @@ function AdminContent() {
       await loadAdminData(false)
     } catch (err: unknown) {
       setStatusMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to update status.' })
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function handleRemoveUser(userId: string, userName: string) {
+    if (!isAdmin) return
+    if (!window.confirm(`Remove user "${userName}"? This cannot be undone.`)) return
+
+    setSubmitting(true)
+    try {
+      const { data: sessionData } = await supabase.auth.getSession()
+      const accessToken = sessionData?.session?.access_token ?? ''
+      const response = await fetch('/api/admin/delete-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ user_id: userId }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Failed to remove user')
+      setStatusMessage({ type: 'success', text: `User "${userName}" removed.` })
+      await loadAdminData(false)
+    } catch (err: unknown) {
+      setStatusMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to remove user.' })
     } finally {
       setSubmitting(false)
     }
@@ -393,37 +445,48 @@ function AdminContent() {
       )}
 
       <div className="portal-stats-row">
-        <div className="portal-stat-card"><div className="portal-stat-icon clients-tone">♙</div><div className="portal-stat-details"><span className="portal-stat-label">Clients</span><span className="portal-stat-value">{clients.length}</span></div></div>
-        <div className="portal-stat-card"><div className="portal-stat-icon projects-tone">▤</div><div className="portal-stat-details"><span className="portal-stat-label">Projects</span><span className="portal-stat-value">{projects.length}</span></div></div>
-        <div className="portal-stat-card"><div className="portal-stat-icon home-tone">📄</div><div className="portal-stat-details"><span className="portal-stat-label">Documents</span><span className="portal-stat-value">{documents.length}</span></div></div>
-        <div className="portal-stat-card"><div className="portal-stat-icon projects-tone">⏳</div><div className="portal-stat-details"><span className="portal-stat-label">Pending Approvals</span><span className="portal-stat-value">{pendingDocumentCount}</span></div></div>
+        <div className="portal-stat-card"><div className="portal-stat-icon projects-tone">▤</div><div className="portal-stat-details"><span className="portal-stat-label">Total Projects</span><span className="portal-stat-value">{projects.length}</span></div></div>
+        <div className="portal-stat-card"><div className="portal-stat-icon projects-tone">💰</div><div className="portal-stat-details"><span className="portal-stat-label">Verified Payments</span><span className="portal-stat-value">{paymentConfirmations.length}</span></div></div>
+        <div className="portal-stat-card"><div className="portal-stat-icon projects-tone">⏳</div><div className="portal-stat-details"><span className="portal-stat-label">Deposits Awaiting Verification</span><span className="portal-stat-value">{deposits.filter((d) => d.status !== 'paid').length}</span></div></div>
+        <div className="portal-stat-card"><div className="portal-stat-icon home-tone">📄</div><div className="portal-stat-details"><span className="portal-stat-label">Pending Approvals</span><span className="portal-stat-value">{pendingDocumentCount}</span></div></div>
       </div>
 
       <div className="portal-tabs">
-        <button type="button" className={`portal-tab-btn ${activeTab === 'portfolio' ? 'active' : ''}`} onClick={() => setActiveTab('portfolio')}><span>◫ Portfolio Oversight</span><span className="portal-tab-count">{projects.length}</span></button>
+        <button type="button" className={`portal-tab-btn ${activeTab === 'payments' ? 'active' : ''}`} onClick={() => setActiveTab('payments')}><span>💰 Payments Oversight</span><span className="portal-tab-count">{deposits.length}</span></button>
         {isAdmin && (<button type="button" className={`portal-tab-btn ${activeTab === 'assignments' ? 'active' : ''}`} onClick={() => setActiveTab('assignments')}><span>◎ Project Assignments</span><span className="portal-tab-count">{assignments.length}</span></button>)}
-        <button type="button" className={`portal-tab-btn ${activeTab === 'users' ? 'active' : ''}`} onClick={() => setActiveTab('users')}><span>👥 Users & Roles</span><span className="portal-tab-count">{profiles.length}</span></button>
+        {isAdmin && (
+          <button type="button" className={`portal-tab-btn ${activeTab === 'users' ? 'active' : ''}`} onClick={() => setActiveTab('users')}><span>👥 Users & Roles</span><span className="portal-tab-count">{profiles.length}</span></button>
+        )}
         <button type="button" className={`portal-tab-btn ${activeTab === 'audit' ? 'active' : ''}`} onClick={() => setActiveTab('audit')}><span>📜 Audit Trail</span><span className="portal-tab-count">{auditEntries.length}</span></button>
       </div>
 
       {loading && (<div className="portal-card" style={{ marginBottom: 20 }}><div className="portal-empty-state"><div className="portal-empty-icon">⏳</div><p className="portal-empty-title">Loading governance records...</p></div></div>)}
 
-      {activeTab === 'portfolio' && (
+      {activeTab === 'payments' && (
         <div style={{ display: 'grid', gap: 20 }}>
           <div className="portal-card">
-            <div className="portal-card-header"><div><h3>Global Client Portfolio</h3><p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>Every client across all teams, with their active project footprint.</p></div></div>
-            {clients.length === 0 ? (<div className="portal-empty-state"><div className="portal-empty-icon">♙</div><p className="portal-empty-title">No clients found</p></div>) : (
+            <div className="portal-card-header">
+              <div>
+                <h3>Milestone Deposits & Payments</h3>
+                <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>
+                  Deposit milestones and externally verified payment confirmations across the portfolio.
+                </p>
+              </div>
+            </div>
+            {deposits.length === 0 ? (
+              <div className="portal-empty-state"><div className="portal-empty-icon">💰</div><p className="portal-empty-title">No deposits recorded</p></div>
+            ) : (
               <div className="portal-table-container">
                 <table className="portal-table">
-                  <thead><tr><th>Client</th><th>Code</th><th>Contact</th><th>Projects</th><th>Created</th></tr></thead>
+                  <thead><tr><th>Project</th><th>Milestone</th><th>Amount</th><th>Status</th><th>Verified At</th></tr></thead>
                   <tbody>
-                    {clients.map((client) => (
-                      <tr key={client.id}>
-                        <td><Link href={`/clients/${client.id}`} className="portal-table-link"><strong>{client.name}</strong></Link></td>
-                        <td><span className="code-badge">{client.client_code}</span></td>
-                        <td><span style={{ fontSize: 12, color: '#475569' }}>{client.email || client.phone || '—'}</span></td>
-                        <td><span className="portal-badge badge-blue">{projectCountByClient.get(client.id) ?? 0}</span></td>
-                        <td><span style={{ fontSize: 12, color: '#64748b' }}>{formatDateTime(client.created_at)}</span></td>
+                    {deposits.map((deposit) => (
+                      <tr key={deposit.id}>
+                        <td><span className="code-badge">{projectRefById.get(deposit.project_id) ?? '—'}</span></td>
+                        <td><strong>{deposit.trigger || 'Milestone Deposit'}</strong></td>
+                        <td><strong>{deposit.currency} {Number(deposit.amount).toLocaleString()}</strong></td>
+                        <td><span className={`portal-badge ${deposit.status === 'paid' ? 'badge-green' : 'badge-amber'}`}>{deposit.status}</span></td>
+                        <td><span style={{ fontSize: 12, color: '#64748b' }}>{deposit.verified_at ? formatDateTime(deposit.verified_at) : '—'}</span></td>
                       </tr>
                     ))}
                   </tbody>
@@ -433,55 +496,31 @@ function AdminContent() {
           </div>
 
           <div className="portal-card">
-            <div className="portal-card-header"><div><h3>All Projects</h3><p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>Cross-team delivery view with lead, team size and document counts.</p></div></div>
-            {projects.length === 0 ? (<div className="portal-empty-state"><div className="portal-empty-icon">▤</div><p className="portal-empty-title">No projects found</p></div>) : (
-              <div className="portal-table-container">
-                <table className="portal-table">
-                  <thead><tr><th>Project</th><th>Client</th><th>Stage</th><th>Status</th><th>Lead</th><th>Team</th><th>Docs</th></tr></thead>
-                  <tbody>
-                    {projects.map((project) => {
-                      const lead = leadByProject.get(project.id)
-                      const leadProfile = lead?.developer_user_id ? profileMap.get(lead.developer_user_id) : null
-                      const team = (assignmentsByProject.get(project.id) ?? []).filter((assignment) => assignment.assignment_role === 'developer')
-                      return (
-                        <tr key={project.id}>
-                          <td><Link href={`/projects/${project.id}`} className="portal-table-link"><strong>{project.name}</strong></Link><p style={{ margin: '2px 0 0', fontSize: 11, color: '#94a3b8' }}>{project.project_reference}</p></td>
-                          <td><span style={{ fontSize: 12, color: '#475569' }}>{project.clients?.name ?? '—'}</span></td>
-                          <td><span className={getStageBadgeClass(project.stage)}>{project.stage.replace(/_/g, ' ')}</span></td>
-                          <td><span className={approvalBadgeClass(project.status)}>{formatApprovalStatus(project.status)}</span></td>
-                          <td><span style={{ fontSize: 12, color: '#475569' }}>{leadProfile?.full_name ?? 'Unassigned'}</span></td>
-                          <td><span className="portal-badge badge-gray">{team.length}</span></td>
-                          <td><span className="portal-badge badge-gray">{documentCountByProject.get(project.id) ?? 0}</span></td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
+            <div className="portal-card-header">
+              <div>
+                <h3>Payment Confirmations</h3>
+                <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>
+                  External payment confirmations recorded by the Sister System webhook.
+                </p>
               </div>
-            )}
-          </div>
-
-          <div className="portal-card">
-            <div className="portal-card-header"><div><h3>All Documents</h3><p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>Global document register. Open any document to inspect its current revision.</p></div><span className="portal-badge badge-amber">{pendingDocumentCount} awaiting approval</span></div>
-            {documents.length === 0 ? (<div className="portal-empty-state"><div className="portal-empty-icon">📄</div><p className="portal-empty-title">No documents found</p></div>) : (
+            </div>
+            {paymentConfirmations.length === 0 ? (
+              <div className="portal-empty-state"><div className="portal-empty-icon">🧾</div><p className="portal-empty-title">No payment confirmations</p></div>
+            ) : (
               <div className="portal-table-container">
                 <table className="portal-table">
-                  <thead><tr><th>Document</th><th>Project</th><th>Type</th><th>Status</th><th>Revision</th><th>Origin</th><th style={{ textAlign: 'right' }}>Action</th></tr></thead>
+                  <thead><tr><th>Project</th><th>Amount</th><th>Provider</th><th>Reference</th><th>Status</th><th>Date</th></tr></thead>
                   <tbody>
-                    {documents.map((document) => {
-                      const revision = getCurrentRevision(document)
-                      return (
-                        <tr key={document.id}>
-                          <td><strong>{document.title}</strong></td>
-                          <td><Link href={`/projects/${document.project_id}`} className="portal-table-link">{document.projects?.project_reference ?? document.projects?.name ?? 'Project'}</Link></td>
-                          <td><span className="code-badge">{document.type || 'Document'}</span></td>
-                          <td><span className={documentStatusBadgeClass(document.status)}>{formatDocumentStatus(document.status, Boolean(revision?.ai_generated), document.type)}</span></td>
-                          <td><span style={{ fontSize: 12, color: '#475569' }}>{revision ? `#${revision.revision_no}` : '—'}</span></td>
-                          <td>{revision?.ai_generated ? (<span className="portal-badge badge-purple">🤖 AI</span>) : (<span className="portal-badge badge-gray">Manual</span>)}</td>
-                          <td style={{ textAlign: 'right' }}><button type="button" className="portal-btn-secondary" style={{ height: 28, fontSize: 11 }} onClick={() => setPreviewDocId(document.id)}>Preview</button></td>
-                        </tr>
-                      )
-                    })}
+                    {paymentConfirmations.map((confirmation) => (
+                      <tr key={confirmation.id}>
+                        <td><span className="code-badge">{projectRefById.get(confirmation.project_id) ?? '—'}</span></td>
+                        <td><strong>{confirmation.currency} {Number(confirmation.amount).toLocaleString()}</strong></td>
+                        <td><span className="portal-badge badge-blue">{confirmation.provider || 'external'}</span></td>
+                        <td>{confirmation.external_reference || confirmation.reference || '—'}</td>
+                        <td><span className={`portal-badge ${confirmation.actor_type === 'legacy_manual' ? 'badge-amber' : 'badge-green'}`}>{confirmation.actor_type === 'legacy_manual' ? 'Legacy manual' : 'Verified'}</span></td>
+                        <td><span style={{ fontSize: 12, color: '#64748b' }}>{formatDateTime(confirmation.verified_at || confirmation.created_at)}</span></td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               </div>
@@ -571,7 +610,7 @@ function AdminContent() {
         </div>
       )}
 
-      {activeTab === 'users' && (
+      {isAdmin && activeTab === 'users' && (
         <div className="portal-card">
           <div className="portal-card-header">
             <div>
@@ -583,11 +622,9 @@ function AdminContent() {
                 <span className="portal-search-icon">🔍</span>
                 <input className="portal-search-input" placeholder="Search team member..." value={searchUser} onChange={(event) => setSearchUser(event.target.value)} />
               </div>
-              {isAdmin && (
-                <button type="button" className="portal-btn-primary" style={{ height: 38, whiteSpace: 'nowrap' }} onClick={() => setIsAddUserModalOpen(true)}>
-                  + Add User
-                </button>
-              )}
+              <button type="button" className="portal-btn-primary" style={{ height: 38, whiteSpace: 'nowrap' }} onClick={() => setIsAddUserModalOpen(true)}>
+                + Add User
+              </button>
             </div>
           </div>
 
@@ -598,7 +635,7 @@ function AdminContent() {
                   <th>User</th>
                   <th>Current Role</th>
                   <th>Account Status</th>
-                  {isAdmin && <th style={{ textAlign: 'right' }}>Role Assignment</th>}
+                  <th style={{ textAlign: 'right' }}>Role Assignment</th>
                 </tr>
               </thead>
               <tbody>
@@ -635,20 +672,21 @@ function AdminContent() {
                           {profile.is_active ? '● Active' : '○ Suspended'}
                         </span>
                       </td>
-                      {isAdmin && (
-                        <td style={{ textAlign: 'right' }}>
-                          <div style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
-                            <select className="form-input" style={{ width: 'auto', height: 32, fontSize: 12 }} value={profile.role} onChange={(event) => handleUpdateRole(profile.id, event.target.value as Profile['role'], profile.role)} disabled={submitting}>
-                              <option value="junior_developer">Junior Developer</option>
-                              <option value="senior_dev_pm">Senior Dev / PM</option>
-                              <option value="administrator">Administrator</option>
-                            </select>
-                            <button type="button" className="portal-btn-secondary" style={{ height: 32, padding: '0 8px', fontSize: 11 }} onClick={() => handleToggleUserStatus(profile.id, profile.is_active)} disabled={submitting}>
-                              {profile.is_active ? 'Suspend' : 'Activate'}
-                            </button>
-                          </div>
-                        </td>
-                      )}
+                      <td style={{ textAlign: 'right' }}>
+                        <div style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
+                          <select className="form-input" style={{ width: 'auto', height: 32, fontSize: 12 }} value={profile.role} onChange={(event) => handleUpdateRole(profile.id, event.target.value as Profile['role'], profile.role)} disabled={submitting}>
+                            <option value="junior_developer">Junior Developer</option>
+                            <option value="senior_dev_pm">Senior Dev / PM</option>
+                            <option value="administrator">Administrator</option>
+                          </select>
+                          <button type="button" className="portal-btn-secondary" style={{ height: 32, padding: '0 8px', fontSize: 11 }} onClick={() => handleToggleUserStatus(profile.id, profile.is_active)} disabled={submitting}>
+                            {profile.is_active ? 'Suspend' : 'Activate'}
+                          </button>
+                          <button type="button" className="portal-btn-secondary" style={{ height: 32, padding: '0 8px', fontSize: 11, color: '#dc2626', borderColor: '#dc2626' }} onClick={() => handleRemoveUser(profile.id, profile.full_name)} disabled={submitting}>
+                            Remove
+                          </button>
+                        </div>
+                      </td>
                     </tr>
                   )
                 })}

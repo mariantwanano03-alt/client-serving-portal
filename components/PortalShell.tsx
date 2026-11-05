@@ -5,6 +5,7 @@ import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
 import { supabase } from '@/lib/supabase'
 import type { User } from '@supabase/supabase-js'
+import { ThemeProvider } from '@/components/ThemeProvider'
 
 export type UserProfile = {
   id: string
@@ -197,6 +198,7 @@ export default function PortalShell({
   const isAdminActive = pathname === '/admin' || pathname.startsWith('/admin')
   const isDashboardActive = pathname === '/dashboard'
   const isHomeActive = pathname === '/'
+  const isSettingsActive = pathname === '/settings' || pathname.startsWith('/settings')
 
   return (
     <PortalContext.Provider
@@ -208,50 +210,57 @@ export default function PortalShell({
         refreshProfile: loadProfile,
       }}
     >
-      <main className="dashboard-shell">
-        <aside className="dashboard-sidebar">
-          <Link href="/dashboard" className="dashboard-brand">
-            <span className="brand-icon">C</span>
-            <span>
-              <strong>Client Serving Portal</strong>
-              <small>Client Delivery Portal</small>
-            </span>
-          </Link>
+      <ThemeProvider>
+        <main className="dashboard-shell">
+          <aside className="dashboard-sidebar">
+            <Link href="/dashboard" className="dashboard-brand">
+              <span className="brand-icon">C</span>
+              <span>
+                <strong>Client Serving Portal</strong>
+                <small>Client Delivery Portal</small>
+              </span>
+            </Link>
 
-          <p className="dashboard-nav-label">WORKSPACE</p>
+            <p className="dashboard-nav-label">WORKSPACE</p>
 
-          <nav className="dashboard-nav">
-            <Link
-              href="/dashboard"
-              className={`dashboard-nav-link ${isDashboardActive ? 'selected' : ''}`}
-            >
-              <span>◫</span> Overview
-            </Link>
-            <Link
-              href="/clients"
-              className={`dashboard-nav-link ${isClientsActive ? 'selected' : ''}`}
-            >
-              <span>♙</span> Clients
-            </Link>
-            <Link
-              href="/projects"
-              className={`dashboard-nav-link ${isProjectsActive ? 'selected' : ''}`}
-            >
-              <span>▤</span> Projects
-            </Link>
-            <Link
-              href="/admin"
-              className={`dashboard-nav-link ${isAdminActive ? 'selected' : ''}`}
-            >
-              <span>⚙</span> Admin
-            </Link>
-            <Link
-              href="/dashboard"
-              className={`dashboard-nav-link ${isHomeActive ? 'selected' : ''}`}
-            >
-              <span>⌂</span> Home
-            </Link>
-          </nav>
+            <nav className="dashboard-nav">
+              <Link
+                href="/dashboard"
+                className={`dashboard-nav-link ${isDashboardActive ? 'selected' : ''}`}
+              >
+                <span>◫</span> Overview
+              </Link>
+              <Link
+                href="/clients"
+                className={`dashboard-nav-link ${isClientsActive ? 'selected' : ''}`}
+              >
+                <span>♙</span> Clients
+              </Link>
+              <Link
+                href="/projects"
+                className={`dashboard-nav-link ${isProjectsActive ? 'selected' : ''}`}
+              >
+                <span>▤</span> Projects
+              </Link>
+              <Link
+                href="/admin"
+                className={`dashboard-nav-link ${isAdminActive ? 'selected' : ''}`}
+              >
+                <span>⚙</span> Admin
+              </Link>
+              <Link
+                href="/settings"
+                className={`dashboard-nav-link ${isSettingsActive ? 'selected' : ''}`}
+              >
+                <span>⚙</span> Settings
+              </Link>
+              <Link
+                href="/dashboard"
+                className={`dashboard-nav-link ${isHomeActive ? 'selected' : ''}`}
+              >
+                <span>⌂</span> Home
+              </Link>
+            </nav>
 
           <div className="dashboard-sidebar-bottom">
             <div className="dashboard-help">
@@ -299,6 +308,7 @@ export default function PortalShell({
           </footer>
         </section>
       </main>
+      </ThemeProvider>
     </PortalContext.Provider>
   )
 }

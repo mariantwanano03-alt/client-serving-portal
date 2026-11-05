@@ -36,8 +36,10 @@ function ClientsContent() {
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   const canCreateClient =
+    role === 'junior_developer' ||
     role === 'senior_dev_pm' ||
     role === 'administrator' ||
+    profile?.role === 'junior_developer' ||
     profile?.role === 'senior_dev_pm' ||
     profile?.role === 'administrator' ||
     (user?.email ? user.email.toLowerCase().includes('senior') : false) ||

@@ -1,9 +1,10 @@
 'use client'
 
-import React, { useEffect, useState, useCallback, useMemo } from 'react'
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import PortalShell, { usePortal } from '@/components/PortalShell'
+import { useTheme } from '@/components/ThemeProvider'
 import { supabase } from '@/lib/supabase'
 import {
   approvalBadgeClass,
@@ -102,6 +103,7 @@ type PurchaseOrder = {
 
 type DocumentRecord = {
   id: string
+  project_id: string
   title: string
   type: string | null
   status: string
@@ -129,6 +131,18 @@ type ReadinessCheck = {
   id: string
   result: string | null
   readiness_items?: ReadinessItem[]
+}
+
+type AuditEntry = {
+  id: string
+  actor_user_id: string | null
+  action: string
+  entity_type: string
+  entity_id: string | null
+  project_id: string | null
+  before_value: unknown
+  after_value: unknown
+  created_at: string
 }
 
 function getCurrentRevision(doc: DocumentRecord): DocumentRevision | undefined {
@@ -286,11 +300,12 @@ function ProjectDetailInner({ id }: { id: string }) {
   const router = useRouter()
   const { role, user, profile } = usePortal()
 
+  const { theme, setTheme } = useTheme()
   const [project, setProject] = useState<Project | null>(null)
   const [teamProfiles, setTeamProfiles] = useState<Profile[]>([])
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<
-    'discovery' | 'requirements' | 'commercials' | 'documents' | 'readiness' | 'devlinks'
+    'discovery' | 'documents' | 'readiness' | 'devlinks'
   >('discovery')
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
@@ -307,6 +322,7 @@ function ProjectDetailInner({ id }: { id: string }) {
   const [handover, setHandover] = useState<Handover | null>(null)
   const [devLinks, setDevLinks] = useState<DevLink[]>([])
   const [clientContactCount, setClientContactCount] = useState(0)
+  const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([])
 
   // Form states
   const [showAddDiscovery, setShowAddDiscovery] = useState(false)
@@ -362,6 +378,11 @@ function ProjectDetailInner({ id }: { id: string }) {
   const [linkUrl, setLinkUrl] = useState('')
 
   const [submitting, setSubmitting] = useState(false)
+  const [approvingDocId, setApprovingDocId] = useState<string | null>(null)
+  const [rejectingDocId, setRejectingDocId] = useState<string | null>(null)
+
+  // Ref to prevent readiness re-init loop
+  const readinessIdRef = useRef<string | null>(null)
 
   const effectiveRole = profile?.role || role
   const leadAssignment = assignments.find(
@@ -375,11 +396,12 @@ function ProjectDetailInner({ id }: { id: string }) {
   )
   const canApprove =
     profile?.is_active !== false &&
+    effectiveRole !== 'administrator' &&
     canApproveProject(effectiveRole, Boolean(currentUserAssignment?.approval_authority))
   const canDraft = Boolean(
-    currentUserAssignment &&
+    effectiveRole !== 'administrator' &&
     canDraftDeliverables(effectiveRole) &&
-    (effectiveRole !== 'senior_dev_pm' || !currentUserAssignment.approval_authority)
+      (effectiveRole !== 'senior_dev_pm' || !currentUserAssignment?.approval_authority)
   )
   const leadProfile = leadAssignment?.developer_user_id
     ? teamProfiles.find((member) => member.id === leadAssignment.developer_user_id)
@@ -411,25 +433,36 @@ function ProjectDetailInner({ id }: { id: string }) {
       ) + 1
     : 1
 
-  const previewDoc = documents.find((doc) => doc.id === previewDocId) || null
-  const previewRevision = previewDoc ? getCurrentRevision(previewDoc) : undefined
-  const previewPreviousRevision = previewDoc
-    ? (previewDoc.document_revisions ?? [])
-        .filter((revision) => revision.revision_no < (previewRevision?.revision_no ?? 0))
-        .sort((a, b) => b.revision_no - a.revision_no)[0]
-    : undefined
-  const previewDiff = buildLineDiff(
-    previewPreviousRevision?.content ?? '',
-    previewRevision?.content ?? ''
-  )
-  const previewStatus = previewDoc
-    ? previewDoc.status === 'sent_to_client'
-      ? 'sent_to_client'
-      : previewRevision?.status || previewDoc.status
-    : ''
-  const previewSender = previewDoc?.sent_to_client_by
-    ? teamProfiles.find((profile) => profile.id === previewDoc.sent_to_client_by)
-    : undefined
+  const previewData = useMemo(() => {
+    const doc = documents.find((d) => d.id === previewDocId) || null
+    const revision = doc ? getCurrentRevision(doc) : undefined
+    const previousRevision = doc
+      ? (doc.document_revisions ?? [])
+          .filter((revision) => revision.revision_no < (revision?.revision_no ?? 0))
+          .sort((a, b) => b.revision_no - a.revision_no)[0]
+      : undefined
+    const diff = buildLineDiff(
+      previousRevision?.content ?? '',
+      revision?.content ?? ''
+    )
+    const status = doc
+      ? doc.status === 'sent_to_client'
+        ? 'sent_to_client'
+        : revision?.status || doc.status
+      : ''
+    const sender = doc?.sent_to_client_by
+      ? teamProfiles.find((profile) => profile.id === doc.sent_to_client_by)
+      : undefined
+
+    return { doc, revision, previousRevision, diff, status, sender }
+  }, [documents, previewDocId, teamProfiles])
+
+  const previewDoc = previewData.doc
+  const previewRevision = previewData.revision
+  const previewPreviousRevision = previewData.previousRevision
+  const previewDiff = previewData.diff
+  const previewStatus = previewData.status
+  const previewSender = previewData.sender
 
   const refreshAllProjectData = useCallback(async () => {
     try {
@@ -455,7 +488,7 @@ function ProjectDetailInner({ id }: { id: string }) {
       // Discovery
       const { data: d } = await supabase
         .from('discovery_records')
-        .select('id, meeting_date, summary, notes, audio_url, transcript, transcription_status, status, created_at')
+        .select('id, meeting_date, summary, notes, audio_url, transcript_ref, transcription_status, status, created_at')
         .eq('project_id', id)
         .order('created_at', { ascending: false })
       setDiscoveries((d ?? []) as Discovery[])
@@ -553,6 +586,15 @@ function ProjectDetailInner({ id }: { id: string }) {
         .eq('project_id', id)
         .order('recorded_at', { ascending: false })
       setDevLinks((l ?? []) as DevLink[])
+
+      // Audit entries for this project
+      const { data: audits } = await supabase
+        .from('audit_entries')
+        .select('id, actor_user_id, action, entity_type, entity_id, project_id, before_value, after_value, created_at')
+        .eq('project_id', id)
+        .order('created_at', { ascending: false })
+        .limit(50)
+      setAuditEntries((audits ?? []) as AuditEntry[])
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Unknown error'
       setStatusMessage({ type: 'error', text: msg })
@@ -653,14 +695,19 @@ function ProjectDetailInner({ id }: { id: string }) {
       changed_by: user?.id,
     })
 
-    await supabase.from('audit_entries').insert({
+    const { error: auditError1 } = await supabase.from('audit_entries').insert({
       actor_user_id: user?.id,
       action: 'project.stage_transition',
       entity_type: 'project',
       entity_id: project.id,
+      project_id: project.id,
       before_value: { stage: prevStage },
       after_value: { stage: newStage },
     })
+
+    if (auditError1) {
+      console.error('Audit insert failed (stage_transition):', auditError1)
+    }
 
     setStatusMessage({ type: 'success', text: `Project advanced to ${newStage.toUpperCase()} stage.` })
     await refreshAllProjectData()
@@ -703,42 +750,77 @@ function ProjectDetailInner({ id }: { id: string }) {
 
     const autoCriteria = [
       {
-        criterion: 'Approved scope of work from discovery',
+        criterion: 'SRS approved by Senior PM',
         mandatory: true,
         overridable: false,
-        result: hasApprovedScope ? 'passed' : 'outstanding'
+        result: documents.some(
+          (d) => d.status === 'approved' && d.title.toLowerCase().includes('software requirements specification')
+        ) ? 'passed' : 'outstanding',
       },
       {
-        criterion: 'Requirements approved by Senior PM',
+        criterion: 'PRD approved by Senior PM',
         mandatory: true,
         overridable: false,
-        result: hasApprovedRequirements ? 'passed' : 'outstanding'
+        result: documents.some(
+          (d) => d.status === 'approved' && d.title.toLowerCase().includes('product requirements document')
+        ) ? 'passed' : 'outstanding',
       },
-      { 
-        criterion: 'Source repository initialized and verified', 
-        mandatory: true, 
-        overridable: false, 
-        result: hasVerifiedRepo ? 'passed' : 'outstanding' 
+      {
+        criterion: 'SLA approved by Senior PM',
+        mandatory: true,
+        overridable: false,
+        result: documents.some(
+          (d) => d.status === 'approved' && (d.title.toLowerCase().includes('service level agreement') || d.type === 'Service Agreement')
+        ) ? 'passed' : 'outstanding',
       },
-      { 
-        criterion: 'Initial milestone deposit paid and confirmed', 
-        mandatory: true, 
-        overridable: true, 
-        result: hasConfirmedDeposit
-          ? 'passed'
-          : readinessCheck?.readiness_items?.find((item) => item.criterion === 'Initial milestone deposit paid and confirmed')?.result === 'overridden'
-            ? 'overridden'
-            : 'outstanding'
+      {
+        criterion: 'Quotation approved by Senior PM',
+        mandatory: true,
+        overridable: false,
+        result: documents.some(
+          (d) => d.status === 'approved' && (d.type === 'Quotation' || d.title.toLowerCase().includes('quotation') || d.title.toLowerCase().includes('proposal'))
+        ) ? 'passed' : 'outstanding',
+      },
+      {
+        criterion: 'Initial milestone deposit paid and confirmed',
+        mandatory: true,
+        overridable: true,
+        result: hasConfirmedDeposit ? 'passed' : 'outstanding',
+      },
+      {
+        criterion: 'Source repository initialized and verified',
+        mandatory: true,
+        overridable: false,
+        result: hasVerifiedRepo ? 'passed' : 'outstanding',
       },
       {
         criterion: 'Client technical contact assigned',
         mandatory: true,
         overridable: false,
-        result: clientContactCount > 0 ? 'passed' : 'outstanding'
+        result: clientContactCount > 0 ? 'passed' : 'outstanding',
+      },
+      {
+        criterion: 'Payment Received',
+        mandatory: true,
+        overridable: false,
+        result: hasConfirmedDeposit ? 'passed' : 'outstanding',
+      },
+      {
+        criterion: 'Signed SLA',
+        mandatory: true,
+        overridable: false,
+        result: documents.some(
+          (d) =>
+            d.status === 'signed' &&
+            (d.title.toLowerCase().includes('service level agreement') ||
+              d.type === 'Service Agreement' ||
+              d.type === 'SLA')
+        ) ? 'passed' : 'outstanding',
       },
     ]
 
     let readinessCheckId = readinessCheck?.id
+    readinessIdRef.current = readinessCheckId ?? null
 
     if (readinessCheckId) {
       const { error: resetError } = await supabase
@@ -764,6 +846,7 @@ function ProjectDetailInner({ id }: { id: string }) {
         return
       }
       readinessCheckId = rc.id
+      readinessIdRef.current = rc.id
     }
 
     if (!readinessCheckId) {
@@ -829,32 +912,18 @@ function ProjectDetailInner({ id }: { id: string }) {
   ), [readinessCheck])
 
   useEffect(() => {
-    if (loading || !canApprove || submitting || !project) return
+    if (loading || !canApprove || !project) return
 
-    const depositItem = readinessCheck?.readiness_items?.find((item) => item.criterion === 'Initial milestone deposit paid and confirmed')
-    const expectedSignature = JSON.stringify([
-      discoveries.some((item) => item.status === 'approved') ? 'passed' : 'outstanding',
-      (requirements.some((item) => item.status === 'approved') || documents.some((item) =>
-        item.status === 'approved' && (item.title.includes('Requirements') || item.title.includes('PRD'))
-      )) ? 'passed' : 'outstanding',
-      devLinks.some((link) => isRepositoryLink(link) && link.verified) ? 'passed' : 'outstanding',
-      deposits.some((deposit) => deposit.status === 'paid') || depositItem?.result === 'overridden' ? 'passed' : 'outstanding',
-      clientContactCount > 0 ? 'passed' : 'outstanding',
-    ])
-    const savedSignature = JSON.stringify((readinessCheck?.readiness_items ?? []).map((item) =>
-      item.result === 'overridden' ? 'passed' : item.result
-    ))
-
-    if (!readinessCheck || savedSignature !== expectedSignature) {
+    // Only initialize readiness once per project mount; subsequent changes
+    // are triggered explicitly by handleInitializeReadiness (called from the
+    // approve flow), not by this effect, to avoid render loops.
+    if (!readinessCheck && readinessIdRef.current === null) {
       void handleInitializeReadiness()
     }
   }, [
     loading,
     canApprove,
-    submitting,
     project,
-    automaticReadinessSignature,
-    savedReadinessSignature,
   ])
 
   async function startRecording() {
@@ -1036,13 +1105,18 @@ function ProjectDetailInner({ id }: { id: string }) {
 
     await supabase.from('quotation_line_items').insert(itemsToInsert)
 
-    await supabase.from('audit_entries').insert({
+    const { error: auditError2 } = await supabase.from('audit_entries').insert({
       actor_user_id: user?.id,
       action: 'quotation.created',
       entity_type: 'quotation',
       entity_id: qData.id,
+      project_id: id,
       after_value: { title: quoteTitle, lines: itemsToInsert },
     })
+
+    if (auditError2) {
+      console.error('Audit insert failed (quotation.created):', auditError2)
+    }
 
     setSubmitting(false)
     setShowAddQuote(false)
@@ -1237,31 +1311,52 @@ function ProjectDetailInner({ id }: { id: string }) {
     }
 
     setSubmitting(true)
-    const { error: approvalError } = await supabase.from('approvals').insert({
-      revision_id: revisionId,
-      approver_id: user?.id,
-      decision,
-      comment: comment.trim() || null,
-    })
+    if (decision === 'approved') setApprovingDocId(docId)
+    else setRejectingDocId(docId)
+    try {
+      const { error: approvalError } = await supabase.from('approvals').insert({
+        revision_id: revisionId,
+        approver_id: user?.id,
+        decision,
+        comment: comment.trim() || null,
+      })
 
-    if (approvalError) {
+      if (approvalError) {
+        setStatusMessage({ type: 'error', text: 'Could not record approval: ' + approvalError.message })
+        return
+      }
+
+      const { error: revisionError } = await supabase.from('document_revisions').update({ status: decision }).eq('id', revisionId)
+      const { error: documentError } = await supabase.from('documents').update({ status: decision }).eq('id', docId)
+
+      if (revisionError || documentError) {
+        setStatusMessage({ type: 'error', text: 'Approval was recorded but the document status could not be updated: ' + (revisionError?.message || documentError?.message) })
+        return
+      }
+
+      const { error: auditError3 } = await supabase.from('audit_entries').insert({
+        actor_user_id: user?.id,
+        action: decision === 'approved' ? 'document.approved' : 'document.rejected',
+        entity_type: 'document',
+        entity_id: docId,
+        project_id: documents.find((d) => d.id === docId)?.project_id,
+        before_value: { status: 'awaiting_review' },
+        after_value: { status: decision, comment: comment.trim() || null },
+      })
+
+      if (auditError3) {
+        console.error('Audit insert failed (document.approved/rejected):', auditError3)
+      }
+
+      setDocReviewNotes('')
+      setStatusMessage({ type: 'success', text: decision === 'approved' ? 'Document approved (internal). You can now send it to the client.' : 'Document revision marked as rejected.' })
+      await refreshAllProjectData()
+      await handleInitializeReadiness()
+    } finally {
       setSubmitting(false)
-      setStatusMessage({ type: 'error', text: 'Could not record approval: ' + approvalError.message })
-      return
+      setApprovingDocId(null)
+      setRejectingDocId(null)
     }
-
-    const { error: revisionError } = await supabase.from('document_revisions').update({ status: decision }).eq('id', revisionId)
-    const { error: documentError } = await supabase.from('documents').update({ status: decision }).eq('id', docId)
-
-    setSubmitting(false)
-    if (revisionError || documentError) {
-      setStatusMessage({ type: 'error', text: 'Approval was recorded but the document status could not be updated: ' + (revisionError?.message || documentError?.message) })
-      return
-    }
-
-    setDocReviewNotes('')
-    setStatusMessage({ type: 'success', text: decision === 'approved' ? 'Document approved (internal). You can now send it to the client.' : 'Document revision marked as rejected.' })
-    await refreshAllProjectData()
   }
 
   async function handleSendToClient(docId: string) {
@@ -1277,23 +1372,28 @@ function ProjectDetailInner({ id }: { id: string }) {
       return
     }
 
-    if (!window.confirm('Send this document to the client? It will be marked as Sent to Client.')) return
+    if (!window.confirm('Send this document to the client via Sister System? It will be pushed to the external deliverables endpoint and marked as Sent to Client.')) return
 
     setSubmitting(true)
-    const { error } = await supabase.from('documents').update({
-      status: 'sent_to_client',
-      sent_to_client_at: new Date().toISOString(),
-      sent_to_client_by: user?.id,
-    }).eq('id', docId)
+    try {
+      const res = await fetch('/api/outbox/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ documentId: docId, projectId: doc.project_id }),
+      })
 
-    setSubmitting(false)
-    if (error) {
-      setStatusMessage({ type: 'error', text: 'Could not send the document: ' + error.message })
-      return
+      const data = await res.json()
+
+      if (!res.ok) {
+        setStatusMessage({ type: 'error', text: data.error || 'Could not send document to Sister System.' })
+        return
+      }
+
+      setStatusMessage({ type: 'success', text: 'Document pushed to Sister System and marked as Sent to Client.' })
+      await refreshAllProjectData()
+    } finally {
+      setSubmitting(false)
     }
-
-    setStatusMessage({ type: 'success', text: 'Document marked as Sent to Client.' })
-    await refreshAllProjectData()
   }
 
   async function handleToggleReadinessItem(itemId: string, currentResult: string, overridable: boolean) {
@@ -1348,11 +1448,16 @@ function ProjectDetailInner({ id }: { id: string }) {
     e.preventDefault()
     if (!canDraft || !linkUrl.trim()) return
     setSubmitting(true)
+    // Repositories are auto-verified upon save; other link types stay unverified.
+    const autoVerified = isRepositoryLink({ link_type: linkType, url: linkUrl })
     const { error } = await supabase.from('development_links').insert({
       project_id: id,
       link_type: linkType,
       url: linkUrl.trim(),
       recorded_by: user?.id,
+      verified: autoVerified,
+      verified_by: autoVerified ? user?.id : null,
+      verified_at: autoVerified ? new Date().toISOString() : null,
     })
     setLinkUrl('')
     setSubmitting(false)
@@ -1361,33 +1466,10 @@ function ProjectDetailInner({ id }: { id: string }) {
       return
     }
     setShowAddLink(false)
-    setStatusMessage({ type: 'success', text: 'Development link recorded and submitted for Senior verification.' })
+    setStatusMessage({ type: 'success', text: autoVerified ? 'Development link recorded and auto-verified.' : 'Development link recorded.' })
     await refreshAllProjectData()
   }
 
-  async function handleVerifyLink(linkId: string) {
-    if (!canApprove) {
-      setStatusMessage({ type: 'error', text: 'Only the project’s assigned approver can verify development links.' })
-      return
-    }
-    const { error } = await supabase.from('development_links').update({
-      verified: true,
-      verified_by: user?.id,
-      verified_at: new Date().toISOString(),
-    }).eq('id', linkId)
-    
-    if (error) {
-      setStatusMessage({ type: 'error', text: 'Could not verify link: ' + error.message })
-      return
-    }
-    setDevLinks((links) => links.map((link) =>
-      link.id === linkId
-        ? { ...link, verified: true }
-        : link
-    ))
-    setStatusMessage({ type: 'success', text: 'Link verified.' })
-    await refreshAllProjectData()
-  }
 
   const quotationTotals = useMemo(() => {
     return quotations.map((q) => {
@@ -1412,7 +1494,7 @@ function ProjectDetailInner({ id }: { id: string }) {
   )
 
   return (
-    <div style={{ maxWidth: 1100 }}>
+    <div className={theme === 'dark' ? 'dark' : 'light'} style={{ maxWidth: 1100 }}>
         <button type="button" className="portal-back-btn" onClick={() => router.push('/projects')}>
           <span>←</span> Back to all projects
         </button>
@@ -1527,12 +1609,6 @@ function ProjectDetailInner({ id }: { id: string }) {
               <button type="button" className={`portal-tab-btn ${activeTab === 'discovery' ? 'active' : ''}`} onClick={() => setActiveTab('discovery')}>
                 <span>🔍 Discovery</span><span className="portal-tab-count">{discoveries.length}</span>
               </button>
-              <button type="button" className={`portal-tab-btn ${activeTab === 'requirements' ? 'active' : ''}`} onClick={() => setActiveTab('requirements')}>
-                <span>📋 Requirements</span><span className="portal-tab-count">{requirements.length}</span>
-              </button>
-              <button type="button" className={`portal-tab-btn ${activeTab === 'commercials' ? 'active' : ''}`} onClick={() => setActiveTab('commercials')}>
-                <span>💰 Commercials</span><span className="portal-tab-count">{quotations.length + deposits.length}</span>
-              </button>
               <button type="button" className={`portal-tab-btn ${activeTab === 'documents' ? 'active' : ''}`} onClick={() => setActiveTab('documents')}>
                 <span>📄 Documents</span><span className="portal-tab-count">{documents.length}</span>
               </button>
@@ -1643,276 +1719,6 @@ function ProjectDetailInner({ id }: { id: string }) {
               </div>
             )}
 
-            {activeTab === 'requirements' && (
-              <div className="portal-card">
-                <div className="portal-card-header">
-                  <div>
-                    <h3>Requirements Matrix ({requirements.length})</h3>
-                    <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>Prioritized functional and technical scope deliverables.</p>
-                  </div>
-                  {canDraft && !showAddReq && (
-                    <button type="button" className="portal-btn-primary" style={{ height: 34, fontSize: 12 }} onClick={() => setShowAddReq(true)}>
-                      <span>+</span> Add Requirement
-                    </button>
-                  )}
-                </div>
-
-                {showAddReq && canDraft && (
-                  <form onSubmit={handleAddRequirement} style={{ background: '#f8fafc', padding: 18, borderRadius: 10, marginBottom: 18 }}>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
-                      <input className="form-input" placeholder="Ref (e.g. REQ-AUTH-01) *" value={reqRef} onChange={(e) => setReqRef(e.target.value)} required />
-                      <input className="form-input" placeholder="Requirement Title *" value={reqTitle} onChange={(e) => setReqTitle(e.target.value)} required />
-                      <select className="form-input" value={reqPriority} onChange={(e) => setReqPriority(e.target.value)}>
-                        <option value="low">Low Priority</option>
-                        <option value="medium">Medium Priority</option>
-                        <option value="high">High Priority</option>
-                      </select>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
-                      <button type="button" className="portal-btn-secondary" onClick={() => setShowAddReq(false)}>Cancel</button>
-                      <button type="submit" className="portal-btn-primary" disabled={submitting}>Save</button>
-                    </div>
-                  </form>
-                )}
-
-                <table className="portal-table">
-                  <thead><tr><th>Ref</th><th>Title</th><th>Priority</th><th>Status</th></tr></thead>
-                  <tbody>
-                    {requirements.map((r) => (
-                      <tr key={r.id}>
-                        <td><span className="code-badge">{r.requirement_ref}</span></td>
-                        <td><strong>{r.title}</strong></td>
-                        <td><span className="portal-badge badge-blue">{r.priority}</span></td>
-                        <td><span className={approvalBadgeClass(r.status)}>{formatApprovalStatus(r.status)}</span></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            {activeTab === 'commercials' && (
-              <div style={{ display: 'grid', gap: 24 }}>
-                {/* Quotations Card */}
-                <div className="portal-card">
-                  <div className="portal-card-header">
-                    <div>
-                      <h3>Quotations & Proposals ({quotations.length})</h3>
-                      <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>Formal line-item quotes, billing estimates, and commercial status.</p>
-                    </div>
-                    {canDraft && !showAddQuote && (
-                      <div style={{ display: 'flex', gap: 8 }}>
-                        <button 
-                          type="button" 
-                          className="portal-btn-secondary" 
-                          style={{ height: 34, fontSize: 12, background: '#f3e8ff', color: '#6b21a8', border: '1px solid #d8b4fe' }} 
-                          onClick={async () => {
-                            setSubmitting(true);
-                            setStatusMessage({ type: 'success', text: 'AI is writing your quotation... This may take 10 seconds.' });
-                            try {
-                              const res = await fetch('/api/generate-document', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ projectId: id, documentType: 'quotation' })
-                              });
-                              const data = await res.json();
-                              if (!res.ok) throw new Error(data.error);
-                              setStatusMessage({ type: 'success', text: 'AI Quotation generated! Check the Documents tab to review it.' });
-                              setActiveTab('documents');
-                              await refreshAllProjectData();
-                            } catch (err: any) {
-                              setStatusMessage({ type: 'error', text: err.message });
-                            } finally {
-                              setSubmitting(false);
-                            }
-                          }}
-                          disabled={submitting}
-                        >
-                          ✨ AI Generate Quotation
-                        </button>
-                        <button type="button" className="portal-btn-primary" style={{ height: 34, fontSize: 12 }} onClick={() => setShowAddQuote(true)}>
-                          <span>+</span> Manual Quotation
-                        </button>
-                      </div>
-                    )}
-                  </div>
-
-                  {showAddQuote && canDraft && (
-                    <form onSubmit={handleCreateQuotation} style={{ background: '#f8fafc', padding: 20, borderRadius: 12, marginBottom: 20 }}>
-                      <h4 style={{ margin: '0 0 14px' }}>Draft Quotation</h4>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
-                        <input className="form-input" placeholder="Quotation Title *" value={quoteTitle} onChange={(e) => setQuoteTitle(e.target.value)} required />
-                        <select className="form-input" value={quoteCurrency} onChange={(e) => setQuoteCurrency(e.target.value)}>
-                          <option value="ZAR">ZAR (R)</option>
-                          <option value="USD">USD ($)</option>
-                          <option value="EUR">EUR (€)</option>
-                          <option value="GBP">GBP (£)</option>
-                        </select>
-                        <input type="date" className="form-input" value={quoteValidity} onChange={(e) => setQuoteValidity(e.target.value)} />
-                      </div>
-                      <div style={{ marginTop: 14 }}>
-                        <label className="form-label" style={{ marginBottom: 6 }}>Line Items</label>
-                        {quoteLines.map((line, idx) => (
-                          <div key={idx} style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-                            <input className="form-input" style={{ flex: 3 }} placeholder="Description" value={line.description} onChange={(e) => {
-                              const newLines = [...quoteLines]; newLines[idx].description = e.target.value; setQuoteLines(newLines)
-                            }} />
-                            <input type="number" className="form-input" style={{ flex: 1 }} placeholder="Qty" value={line.quantity} onChange={(e) => {
-                              const newLines = [...quoteLines]; newLines[idx].quantity = Number(e.target.value); setQuoteLines(newLines)
-                            }} />
-                            <input type="number" className="form-input" style={{ flex: 1.5 }} placeholder="Unit Rate" value={line.unit_amount} onChange={(e) => {
-                              const newLines = [...quoteLines]; newLines[idx].unit_amount = Number(e.target.value); setQuoteLines(newLines)
-                            }} />
-                          </div>
-                        ))}
-                        <button type="button" className="portal-back-btn" style={{ fontSize: 12, marginTop: 4 }} onClick={() => setQuoteLines([...quoteLines, { description: '', quantity: 1, unit_amount: 0, amount: 0, tax_rate: 15 }])}>
-                          + Add another line
-                        </button>
-                      </div>
-                      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
-                        <button type="button" className="portal-btn-secondary" onClick={() => setShowAddQuote(false)}>Cancel</button>
-                        <button type="submit" className="portal-btn-primary" disabled={submitting}>Save Quotation</button>
-                      </div>
-                    </form>
-                  )}
-
-                  {quotations.length === 0 ? (
-                    <div className="portal-empty-state"><p className="portal-empty-title">No quotations drafted yet</p></div>
-                  ) : (
-                    <table className="portal-table">
-                      <thead><tr><th>Title</th><th>Validity</th><th>Total Value</th><th>Status</th>{canApprove && <th>Action</th>}</tr></thead>
-                      <tbody>
-                        {quotations.map((q) => {
-                          const totals = quotationTotals.find((t) => t.id === q.id)
-                          return (
-                            <tr key={q.id}>
-                              <td><strong>{q.title}</strong></td>
-                              <td>{q.validity_date ? `Valid until ${q.validity_date}` : 'Open'}</td>
-                              <td><strong style={{ color: '#10b981' }}>{q.currency} {totals ? totals.total.toLocaleString() : '—'}</strong></td>
-                              <td><span className={`portal-badge ${q.status === 'accepted' ? 'badge-green' : 'badge-amber'}`}>{q.status}</span></td>
-                              {canApprove && (
-                                <td>
-                                  {q.status === 'draft' && (
-                                    <button type="button" className="portal-btn-secondary" style={{ height: 28, fontSize: 11 }} onClick={() => handleUpdateQuotationStatus(q.id, 'sent')}>Mark Sent</button>
-                                  )}
-                                  {q.status === 'sent' && (
-                                    <button type="button" className="portal-btn-primary" style={{ height: 28, fontSize: 11 }} onClick={() => handleUpdateQuotationStatus(q.id, 'accepted')}>Mark Accepted ✓</button>
-                                  )}
-                                </td>
-                              )}
-                            </tr>
-                          )
-                        })}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-
-                {/* Deposits Card */}
-                <div className="portal-card">
-                  <div className="portal-card-header">
-                    <div>
-                      <h3>Milestone Deposits & Payments ({deposits.length})</h3>
-                      <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>Required upfront commitments and confirmed payment receipts.</p>
-                    </div>
-                    {canApprove && !showAddDeposit && (
-                      <button type="button" className="portal-btn-primary" style={{ height: 34, fontSize: 12 }} onClick={() => setShowAddDeposit(true)}>
-                        <span>+</span> Add Deposit Milestone
-                      </button>
-                    )}
-                  </div>
-
-                  {showAddDeposit && canApprove && (
-                    <form onSubmit={handleAddDeposit} style={{ background: '#f8fafc', padding: 18, borderRadius: 10, marginBottom: 18 }}>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
-                        <input className="form-input" placeholder="Amount (ZAR) *" type="number" value={depAmount} onChange={(e) => setDepAmount(e.target.value)} required />
-                        <input className="form-input" placeholder="Trigger (e.g. 50% upfront)" value={depTrigger} onChange={(e) => setDepTrigger(e.target.value)} />
-                        <input type="date" className="form-input" value={depDue} onChange={(e) => setDepDue(e.target.value)} />
-                      </div>
-                      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
-                        <button type="button" className="portal-btn-secondary" onClick={() => setShowAddDeposit(false)}>Cancel</button>
-                        <button type="submit" className="portal-btn-primary" disabled={submitting}>Save</button>
-                      </div>
-                    </form>
-                  )}
-
-                  <table className="portal-table">
-                    <thead><tr><th>Trigger / Milestone</th><th>Amount</th><th>Due Date</th><th>Status</th><th>External Verification</th></tr></thead>
-                    <tbody>
-                      {deposits.map((dep) => {
-                        const confirmation = confirmationByDeposit.get(dep.id)
-                        const legacyManual = confirmation?.actor_type === 'legacy_manual'
-                        const legacyVerifier = confirmation?.confirmed_by ? teamProfiles.find((member) => member.id === confirmation.confirmed_by)?.full_name : undefined
-                        return (
-                          <tr key={dep.id}>
-                            <td><strong>{dep.trigger || 'Milestone Deposit'}</strong></td>
-                            <td><strong>{dep.currency} {Number(dep.amount).toLocaleString()}</strong></td>
-                            <td>{dep.due_date || 'On Signing'}</td>
-                            <td><span className={`portal-badge ${dep.status === 'paid' ? 'badge-green' : 'badge-amber'}`}>{dep.status === 'paid' ? '✓ Paid & Confirmed' : '⏳ Awaiting External Verification'}</span></td>
-                            <td>
-                              {confirmation ? (
-                                <div style={{ display: 'grid', gap: 2 }}>
-                                  <strong style={{ fontSize: 12, color: '#334155' }}>{legacyManual ? 'Legacy manual confirmation' : confirmation.provider || dep.verified_by_provider || 'External payment feed'}</strong>
-                                  <span style={{ fontSize: 11, color: '#64748b' }}>Ref: {confirmation.external_reference || confirmation.reference || dep.external_reference || '—'}</span>
-                                  <span style={{ fontSize: 11, color: '#94a3b8' }}>{legacyManual ? 'Recorded' : 'Verified'} {formatVerifiedAt(confirmation.verified_at || dep.verified_at || confirmation.created_at)}{legacyManual && legacyVerifier ? ` by ${legacyVerifier}` : ''}</span>
-                                </div>
-                              ) : dep.status === 'paid' ? (
-                                <span style={{ fontSize: 11, color: '#64748b' }}>Ref: {dep.external_reference || '—'}</span>
-                              ) : (
-                                <span className="portal-badge badge-gray">Awaiting webhook</span>
-                              )}
-                            </td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
-                  <div style={{ marginTop: 12, padding: '10px 12px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12, color: '#64748b' }}>
-                    Payment confirmations are verified automatically by the external accounting webhook. Manual confirmation is disabled.
-                  </div>
-                </div>
-
-                {/* Purchase Orders */}
-                <div className="portal-card">
-                  <div className="portal-card-header">
-                    <div><h3>Client Purchase Orders ({purchaseOrders.length})</h3></div>
-                    {canApprove && !showAddPO && (
-                      <button type="button" className="portal-btn-secondary" style={{ height: 32, fontSize: 12 }} onClick={() => setShowAddPO(true)}>+ Record PO</button>
-                    )}
-                  </div>
-                  {showAddPO && canApprove && (
-                    <form onSubmit={handleAddPO} style={{ background: '#f8fafc', padding: 16, borderRadius: 10, marginBottom: 16 }}>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
-                        <input className="form-input" placeholder="PO Number (e.g. PO-98124) *" value={poNumber} onChange={(e) => setPoNumber(e.target.value)} required />
-                        <input className="form-input" placeholder="Amount" type="number" value={poAmount} onChange={(e) => setPoAmount(e.target.value)} />
-                        <input type="date" className="form-input" value={poDate} onChange={(e) => setPoDate(e.target.value)} />
-                      </div>
-                      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10 }}>
-                        <button type="button" className="portal-btn-secondary" onClick={() => setShowAddPO(false)}>Cancel</button>
-                        <button type="submit" className="portal-btn-primary" disabled={submitting}>Save PO</button>
-                      </div>
-                    </form>
-                  )}
-                  {purchaseOrders.length === 0 ? (
-                    <p style={{ color: '#94a3b8', fontSize: 13 }}>No purchase orders recorded yet.</p>
-                  ) : (
-                    <table className="portal-table">
-                      <thead><tr><th>PO Number</th><th>Amount</th><th>Date</th></tr></thead>
-                      <tbody>
-                        {purchaseOrders.map((po) => (
-                          <tr key={po.id}>
-                            <td><span className="code-badge">{po.po_number}</span></td>
-                            <td>{po.currency} {Number(po.amount).toLocaleString()}</td>
-                            <td>{po.po_date || '—'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-              </div>
-            )}
-
             {activeTab === 'documents' && (
               <div className="portal-card">
                 <div className="portal-card-header">
@@ -1996,6 +1802,34 @@ function ProjectDetailInner({ id }: { id: string }) {
 
                       <button type="button" className="portal-btn-primary" style={{ height: 34, fontSize: 12 }} onClick={() => { setEditingDocId(null); setShowAddDoc(true); }}>
                         <span>+</span> Manual Document
+                      </button>
+
+                      <button 
+                        type="button" 
+                        className="portal-btn-secondary" 
+                        style={{ height: 34, fontSize: 12, background: '#f3e8ff', color: '#6b21a8', border: '1px solid #d8b4fe' }} 
+                        onClick={async () => {
+                          setSubmitting(true);
+                          setStatusMessage({ type: 'success', text: 'AI is writing your quotation... This may take 10 seconds.' });
+                          try {
+                            const res = await fetch('/api/generate-document', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ projectId: id, documentType: 'quotation' })
+                            });
+                            const data = await res.json();
+                            if (!res.ok) throw new Error(data.error);
+                            setStatusMessage({ type: 'success', text: 'AI Quotation generated! Check the Documents tab to review it.' });
+                            await refreshAllProjectData();
+                          } catch (err: any) {
+                            setStatusMessage({ type: 'error', text: err.message });
+                          } finally {
+                            setSubmitting(false);
+                          }
+                        }}
+                        disabled={submitting}
+                      >
+                        ✨ AI Generate Quotation
                       </button>
                     </div>
                   )}
@@ -2090,8 +1924,8 @@ function ProjectDetailInner({ id }: { id: string }) {
                                 {doc.status === 'sent_to_client' ? (
                                   <span className="portal-badge badge-blue">Sent</span>
                                 ) : effectiveStatus === 'approved' ? (
-                                  // ONLY show "Send to Client" for Quotation, Proposal, and SLA
-                                  doc.type === 'Quotation' || doc.type === 'Proposal' || doc.type === 'Service Agreement' ? (
+                                  // ONLY show "Send to Client" for Quotation and SLA (Service Agreement)
+                                  doc.type === 'Quotation' || doc.type === 'Service Agreement' ? (
                                     <button type="button" className="portal-btn-primary" style={{ height: 28, fontSize: 11 }} onClick={() => handleSendToClient(doc.id)}>Send to Client</button>
                                   ) : doc.type === 'Prompt File' ? (
                                     <span className="portal-badge badge-green">Internal Only</span>
@@ -2206,11 +2040,6 @@ function ProjectDetailInner({ id }: { id: string }) {
                           )}
                         </div>
                       </div>
-                      {effectiveRole === 'administrator' && (
-                        <Link href="/admin" className="portal-btn-secondary" style={{ marginTop: 12, textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>
-                          Manage assignments in Admin →
-                        </Link>
-                      )}
                     </div>
 
                     <div style={{ border: '1px solid #e8ecf3', padding: 18, borderRadius: 10 }}>
@@ -2250,6 +2079,8 @@ function ProjectDetailInner({ id }: { id: string }) {
               </div>
             )}
 
+
+
             {activeTab === 'devlinks' && (
               <div className="portal-card">
                 <div className="portal-card-header">
@@ -2257,6 +2088,7 @@ function ProjectDetailInner({ id }: { id: string }) {
                     <h3>Development Links & Repositories ({devLinks.length})</h3>
                   </div>
                   <div style={{ display: 'flex', gap: 8 }}>
+                    {canDraft && (
                     <button 
                       type="button" 
                       className="portal-btn-secondary" 
@@ -2280,6 +2112,7 @@ function ProjectDetailInner({ id }: { id: string }) {
                     >
                       ✨ Generate Dev Prompt (.md)
                     </button>
+                    )}
                     {canDraft && !showAddLink && (
                       <button type="button" className="portal-btn-primary" style={{ height: 34, fontSize: 12 }} onClick={() => setShowAddLink(true)}>
                         <span>+</span> Record Link
@@ -2305,26 +2138,21 @@ function ProjectDetailInner({ id }: { id: string }) {
                   </form>
                 )}
                 <table className="portal-table">
-                  <thead><tr><th>Type</th><th>URL</th><th>Status</th>{canApprove && <th>Action</th>}</tr></thead>
+                  <thead><tr><th>Type</th><th>URL</th><th>Status</th></tr></thead>
                   <tbody>
                     {devLinks.map((l) => (
                       <tr key={l.id}>
                         <td><span className="portal-badge badge-gray">{l.link_type}</span></td>
                         <td><a href={l.url} target="_blank" rel="noreferrer" className="portal-table-link">{l.url} ↗</a></td>
                         <td><span className={`portal-badge ${l.verified ? 'badge-green' : 'badge-amber'}`}>{formatLinkStatus(l.verified)}</span></td>
-                        {canApprove && (
-                          <td>
-                            {!l.verified && (
-                              <button type="button" className="portal-btn-primary" style={{ height: 26, fontSize: 11 }} onClick={() => handleVerifyLink(l.id)}>Verify Link ✓</button>
-                            )}
-                          </td>
-                        )}
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
             )}
+
+
           </>
         )}
 
@@ -2430,13 +2258,18 @@ function ProjectDetailInner({ id }: { id: string }) {
                     )}
                     {canApprove && previewRevision && previewDoc.status !== 'sent_to_client' && (
                       previewDoc.status === 'approved' ? (
-                        previewDoc.type === 'Quotation' || previewDoc.type === 'Proposal' || previewDoc.type === 'Service Agreement' ? (
+                        previewDoc.type === 'Quotation' || previewDoc.type === 'Service Agreement' ? (
                           <button type="button" className="portal-btn-primary" onClick={() => handleSendToClient(previewDoc.id)} disabled={submitting}>Send to Client</button>
                         ) : null
                       ) : (
-                        <button type="button" className="portal-btn-primary" onClick={() => handleApproveDocument(previewDoc.id, previewRevision.id, 'approved', docReviewNotes)} disabled={submitting}>
-                          {submitting ? 'Approving...' : 'Approve ✓'}
-                        </button>
+                        <>
+                          <button type="button" className="portal-btn-primary" onClick={() => handleApproveDocument(previewDoc.id, previewRevision.id, 'approved', docReviewNotes)} disabled={approvingDocId === previewDoc.id}>
+                            {approvingDocId === previewDoc.id ? 'Approving...' : 'Approve ✓'}
+                          </button>
+                          <button type="button" className="portal-btn-secondary" onClick={() => handleApproveDocument(previewDoc.id, previewRevision.id, 'rejected', docReviewNotes)} disabled={rejectingDocId === previewDoc.id}>
+                            {rejectingDocId === previewDoc.id ? 'Rejecting...' : 'Reject ✕'}
+                          </button>
+                        </>
                       )
                     )}
                   </div>
