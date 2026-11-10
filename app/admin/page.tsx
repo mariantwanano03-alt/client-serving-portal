@@ -33,6 +33,7 @@ type Project = {
   stage: string
   status: string
   client_id: string
+  developer_lead: string | null
   created_at: string
   clients: { client_code: string; name: string } | null
 }
@@ -73,7 +74,7 @@ type AssignmentRow = {
   revoked_at: string | null
 }
 
-type AdminTab = 'users' | 'assignments' | 'audit' | 'payments'
+type AdminTab = 'users' | 'assignments' | 'projects' | 'audit' | 'payments'
 
 const PENDING_DOC_STATUSES = new Set([
   'draft',
@@ -186,19 +187,37 @@ function AdminContent() {
       const [profsRes, projectsRes, docsRes, assignmentsRes, auditsRes, depositsRes, confirmationsRes] =
         await Promise.all([
           supabase.from('profiles').select('id, full_name, role, is_active, created_at').order('created_at', { ascending: false }),
-          supabase.from('projects').select('id, project_reference, name, stage, status, client_id, created_at, clients(client_code, name)').order('created_at', { ascending: false }),
-          supabase.from('documents').select('id, project_id, title, type, status, current_revision_id, sent_to_client_at, created_at, projects(project_reference, name), document_revisions:document_revisions_document_id_fkey(id, revision_no, content, status, ai_generated, ai_model, ai_model_version, ai_generated_at, created_at)').order('created_at', { ascending: false }),
+          supabase.from('projects').select('id, project_reference, name, stage, status, client_id, developer_lead, created_at, clients(client_code, name)').order('created_at', { ascending: false }),
+          supabase.from('documents').select('id, project_id, title, type, status, current_revision_id, sent_to_client_at, created_at, projects(project_reference, name)').order('created_at', { ascending: false }),
           supabase.from('assignments').select('id, project_id, developer_user_id, assignment_role, approval_authority, is_active, assigned_at, revoked_at').eq('is_active', true).order('assigned_at', { ascending: true }),
           supabase.from('audit_entries').select('*').order('created_at', { ascending: false }).limit(100),
-          supabase.from('deposits').select('id, project_id, amount, currency, due_date, trigger, status, external_reference, verified_at, verified_by_provider').order('created_at', { ascending: false }),
-          supabase.from('payment_confirmations').select('id, project_id, deposit_id, amount, currency, reference, provider, external_reference, actor_type, confirmed_by, verified_at, created_at').order('created_at', { ascending: false }),
+          supabase.from('deposits').select('id, project_id, amount, currency, due_date, trigger, status, created_at').order('created_at', { ascending: false }),
+          supabase.from('payment_confirmations').select('id, deposit_id, amount, reference, confirmed_by, created_at').order('created_at', { ascending: false }),
         ])
 
       const errors = [profsRes.error, projectsRes.error, docsRes.error, assignmentsRes.error, auditsRes.error, depositsRes.error, confirmationsRes.error].filter(Boolean)
 
       if (profsRes.data) setProfiles(profsRes.data as Profile[])
       if (projectsRes.data) setProjects(projectsRes.data as unknown as Project[])
-      if (docsRes.data) setDocuments(docsRes.data as unknown as DocumentRow[])
+      if (docsRes.data) {
+        const docsWithRevs: DocumentRow[] = (docsRes.data as unknown as DocumentRow[]).map((d) => ({ ...d, document_revisions: [] as Revision[] }))
+        // Fetch revisions separately to avoid FK relation-name 400 errors
+        const docIds = docsWithRevs.map((d) => d.id)
+        if (docIds.length > 0) {
+          const { data: revs } = await supabase
+            .from('document_revisions')
+            .select('*')
+            .in('document_id', docIds)
+          const revMap = new Map<string, Revision[]>()
+          for (const rev of (revs ?? [])) {
+            const arr = revMap.get(rev.document_id) ?? []
+            arr.push(rev as Revision)
+            revMap.set(rev.document_id, arr)
+          }
+          docsWithRevs.forEach((d) => { d.document_revisions = revMap.get(d.id) ?? [] })
+        }
+        setDocuments(docsWithRevs)
+      }
       if (assignmentsRes.data) setAssignments(assignmentsRes.data as AssignmentRow[])
       if (auditsRes.data) setAuditEntries(auditsRes.data as AuditEntry[])
       if (depositsRes.data) setDeposits(depositsRes.data as Deposit[])
@@ -455,6 +474,9 @@ function AdminContent() {
         <button type="button" className={`portal-tab-btn ${activeTab === 'payments' ? 'active' : ''}`} onClick={() => setActiveTab('payments')}><span>💰 Payments Oversight</span><span className="portal-tab-count">{deposits.length}</span></button>
         {isAdmin && (<button type="button" className={`portal-tab-btn ${activeTab === 'assignments' ? 'active' : ''}`} onClick={() => setActiveTab('assignments')}><span>◎ Project Assignments</span><span className="portal-tab-count">{assignments.length}</span></button>)}
         {isAdmin && (
+          <button type="button" className={`portal-tab-btn ${activeTab === 'projects' ? 'active' : ''}`} onClick={() => setActiveTab('projects')}><span>📋 All Projects</span><span className="portal-tab-count">{projects.length}</span></button>
+        )}
+        {isAdmin && (
           <button type="button" className={`portal-tab-btn ${activeTab === 'users' ? 'active' : ''}`} onClick={() => setActiveTab('users')}><span>👥 Users & Roles</span><span className="portal-tab-count">{profiles.length}</span></button>
         )}
         <button type="button" className={`portal-tab-btn ${activeTab === 'audit' ? 'active' : ''}`} onClick={() => setActiveTab('audit')}><span>📜 Audit Trail</span><span className="portal-tab-count">{auditEntries.length}</span></button>
@@ -609,7 +631,112 @@ function AdminContent() {
           })}
         </div>
       )}
-
+      
+      {isAdmin && activeTab === 'projects' && (
+        <div className="portal-card">
+          <div className="portal-card-header">
+            <div>
+              <h3>All Agency Projects</h3>
+              <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>
+                Review, approve, and assign leads to all projects in the system.
+              </p>
+            </div>
+          </div>
+          {projects.length === 0 ? (
+            <div className="portal-empty-state">
+              <div className="portal-empty-icon">📋</div>
+              <p className="portal-empty-title">No projects in the system yet</p>
+            </div>
+          ) : (
+            <div className="portal-table-container">
+              <table className="portal-table">
+                <thead>
+                  <tr>
+                    <th>Reference</th>
+                    <th>Project Name</th>
+                    <th>Client</th>
+                    <th>Template</th>
+                    <th>Stage</th>
+                    <th>Lead Developer</th>
+                    <th style={{ textAlign: 'right' }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {projects.map((project) => {
+                    const currentLead = leadByProject.get(project.id)
+                    const leadProfile = currentLead?.developer_user_id
+                      ? profileMap.get(currentLead.developer_user_id)
+                      : null
+                    return (
+                      <tr key={project.id}>
+                        <td><span className="code-badge">{project.project_reference}</span></td>
+                        <td>
+                          <Link href={`/projects/${project.id}`} className="portal-table-link" style={{ fontWeight: 600 }}>
+                            {project.name}
+                          </Link>
+                        </td>
+                        <td>
+                          {project.clients
+                            ? <span style={{ fontSize: 13 }}>{project.clients.name} <span style={{ color: '#94a3b8' }}>({project.clients.client_code})</span></span>
+                            : <span style={{ color: '#94a3b8' }}>—</span>}
+                        </td>
+                        <td>
+                          <span style={{ color: '#94a3b8' }}>—</span>
+                        </td>
+                        <td>
+                          <span className={getStageBadgeClass(project.stage)}>
+                            {project.stage.replace(/_/g, ' ')}
+                          </span>
+                        </td>
+                        <td>
+                          <span style={{ fontSize: 13 }}>{leadProfile?.full_name || <span style={{ color: '#94a3b8' }}>Unassigned</span>}</span>
+                        </td>
+                        <td style={{ textAlign: 'right' }}>
+                          <div style={{ display: 'inline-flex', gap: 8 }}>
+                            {project.stage === 'discovery' && (
+                              <button
+                                type="button"
+                                className="portal-btn-primary"
+                                style={{ height: 28, fontSize: 11, padding: '0 10px' }}
+                                disabled={submitting}
+                                onClick={async () => {
+                                  if (!window.confirm(`Approve "${project.name}" and advance to Scoping?`)) return
+                                  setSubmitting(true)
+                                  const { error } = await supabase
+                                    .from('projects')
+                                    .update({ stage: 'scoping' })
+                                    .eq('id', project.id)
+                                  setSubmitting(false)
+                                  if (error) {
+                                    setStatusMessage({ type: 'error', text: 'Could not approve project: ' + error.message })
+                                  } else {
+                                    setStatusMessage({ type: 'success', text: `✓ Project "${project.name}" approved and moved to Scoping.` })
+                                    await loadAdminData(false)
+                                  }
+                                }}
+                              >
+                                ✓ Approve
+                              </button>
+                            )}
+                            <Link
+                              href={`/projects/${project.id}`}
+                              className="portal-btn-secondary"
+                              style={{ height: 28, fontSize: 11, padding: '0 10px', textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
+                            >
+                              Open
+                            </Link>
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+      
       {isAdmin && activeTab === 'users' && (
         <div className="portal-card">
           <div className="portal-card-header">

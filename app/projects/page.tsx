@@ -89,6 +89,7 @@ function ProjectsContent() {
       const { data: clientData } = await supabase
         .from('clients')
         .select('id, client_code, name')
+        .eq('status', 'active')
         .order('client_code')
 
       if (!ignore && clientData) {
@@ -348,14 +349,13 @@ function ProjectsContent() {
           </select>
         </div>
 
-        {canCreateProject && !showAddForm && (
-          <button
-            type="button"
+        {canCreateProject && (
+          <Link
+            href="/projects/new"
             className="portal-btn-primary"
-            onClick={() => setShowAddForm(true)}
           >
             <span>+</span> Add Project
-          </button>
+          </Link>
         )}
       </div>
 

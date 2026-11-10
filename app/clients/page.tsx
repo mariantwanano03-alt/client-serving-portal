@@ -50,6 +50,7 @@ function ClientsContent() {
     const { data, error } = await supabase
       .from('clients')
       .select('id, client_code, name, email, created_at')
+      .eq('status', 'active')
       .order('created_at', { ascending: false })
 
     if (error) {
@@ -67,6 +68,7 @@ function ClientsContent() {
       const { data, error } = await supabase
         .from('clients')
         .select('id, client_code, name, email, created_at')
+        .eq('status', 'active')
         .order('created_at', { ascending: false })
 
       if (ignore) return

@@ -43,6 +43,13 @@ export function canDraftDeliverables(role?: string | null): boolean {
   return role === 'junior_developer' || canApproveDeliverables(role)
 }
 
+/**
+ * Only Senior Developers / PMs and Administrators may upload source PDFs.
+ */
+export function canUploadDocuments(role?: string | null): boolean {
+  return role === 'senior_dev_pm' || role === 'administrator'
+}
+
 export function formatApprovalStatus(status?: string | null): string {
   const normalized = (status ?? '').trim().toLowerCase()
 

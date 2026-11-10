@@ -11,8 +11,6 @@ function LoginPageContent() {
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
-  // Present when the SessionGuard ended a suspended user's open session and
-  // redirected them here (?suspended=1).
   const searchParams = useSearchParams()
   const suspendedNotice = searchParams.get('suspended') === '1'
 
@@ -27,7 +25,6 @@ function LoginPageContent() {
     setErrorMessage('')
 
     try {
-      // 7-second timeout to prevent indefinite hangs if the local backend is offline
       const timeoutPromise = new Promise<{ error: { message: string } }>((_, reject) =>
         setTimeout(
           () =>
@@ -59,10 +56,6 @@ function LoginPageContent() {
         return
       }
 
-      // PRD BR-01: only authenticated, ACTIVE internal users may access the
-      // portal. Auth-level bans are enforced by Supabase, but an account
-      // merely flagged is_active=false in the profiles table (e.g. suspended
-      // before ban enforcement) must be signed back out here.
       const { data: sessionData } = await supabase.auth.getSession()
       const userId = sessionData.session?.user.id
       if (userId) {
@@ -93,7 +86,6 @@ function LoginPageContent() {
         err instanceof Error ? err.message : 'An unexpected error occurred during sign-in.'
       setErrorMessage(msg)
     } finally {
-      // ALWAYS unlock loading state so the button and form are immediately usable
       setLoading(false)
     }
   }
@@ -120,10 +112,26 @@ function LoginPageContent() {
             </div>
           )}
 
+          {/* HIGHLY VISIBLE ERROR BANNER */}
           {errorMessage && (
-            <div className="auth-alert-error" role="alert">
-              <span>⚠️</span>
-              <div>{errorMessage}</div>
+            <div 
+              style={{ 
+                padding: '12px 16px', 
+                borderRadius: '8px', 
+                marginBottom: '20px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px',
+                fontWeight: 600,
+                fontSize: '14px',
+                backgroundColor: '#ef4444', // Solid Red
+                color: '#ffffff', // White text
+                boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+              }} 
+              role="alert"
+            >
+              <span style={{ fontSize: '18px' }}>⚠️</span>
+              <span>{errorMessage}</span>
             </div>
           )}
 
@@ -159,10 +167,7 @@ function LoginPageContent() {
             />
           </div>
 
-          <button
-            type="submit"
-            className="auth-submit-btn"
-          >
+          <button type="submit" className="auth-submit-btn" disabled={loading}>
             {loading ? (
               <>
                 <span>⏳</span> Signing in...
@@ -189,7 +194,6 @@ function LoginPageContent() {
   )
 }
 
-// useSearchParams requires a Suspense boundary for static prerendering.
 export default function LoginPage() {
   return (
     <Suspense fallback={null}>

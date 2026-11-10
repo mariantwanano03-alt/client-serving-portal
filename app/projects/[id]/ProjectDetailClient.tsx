@@ -10,6 +10,7 @@ import {
   approvalBadgeClass,
   canApproveProject,
   canDraftDeliverables,
+  canUploadDocuments,
   documentStatusBadgeClass,
   formatAiOrigin,
   formatApprovalStatus,
@@ -28,16 +29,24 @@ type Project = {
   clients: { client_code: string; name: string } | null
 }
 
-type Discovery = {
+type DiscoverySession = {
   id: string
+  client_id: string
+  project_id: string
+  meeting_title: string | null
   meeting_date: string | null
-  summary: string | null
-  notes: string | null
-  audio_url?: string | null
-  transcript?: string | null
-  transcription_status?: string | null
-  status?: string | null
-  created_at?: string
+  transcript: string | null
+  extraction: {
+    company_name?: string | null
+    email?: string | null
+    phone?: string | null
+    contacts?: { name: string; role?: string | null }[]
+    requirements?: { title: string; priority?: string }[]
+  } | null
+  generation_status: 'pending' | 'extracting' | 'promoting' | 'generating' | 'complete' | 'failed'
+  failure_reason: string | null
+  created_at: string
+  updated_at: string
 }
 
 type Requirement = {
@@ -125,6 +134,11 @@ type DocumentRevision = {
   ai_model_version?: string | null
   ai_generated_at?: string | null
   created_at?: string
+  source?: string | null
+  uploaded_file_path?: string | null
+  uploaded_file_name?: string | null
+  uploaded_file_size?: number | null
+  uploaded_mime_type?: string | null
 }
 
 type ReadinessCheck = {
@@ -310,7 +324,7 @@ function ProjectDetailInner({ id }: { id: string }) {
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   // Sub-records
-  const [discoveries, setDiscoveries] = useState<Discovery[]>([])
+  const [discoverySession, setDiscoverySession] = useState<DiscoverySession | null>(null)
   const [requirements, setRequirements] = useState<Requirement[]>([])
   const [quotations, setQuotations] = useState<Quotation[]>([])
   const [deposits, setDeposits] = useState<Deposit[]>([])
@@ -324,18 +338,7 @@ function ProjectDetailInner({ id }: { id: string }) {
   const [clientContactCount, setClientContactCount] = useState(0)
   const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([])
 
-  // Form states
-  const [showAddDiscovery, setShowAddDiscovery] = useState(false)
-  const [discDate, setDiscDate] = useState('')
-  const [discSummary, setDiscSummary] = useState('')
-  const [discNotes, setDiscNotes] = useState('')
   
-  // Audio States
-  const [isRecording, setIsRecording] = useState(false)
-  const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null)
-  const [audioBlob, setAudioBlob] = useState<Blob | null>(null)
-  const [isUploadingAudio, setIsUploadingAudio] = useState(false)
-
   const [showAddReq, setShowAddReq] = useState(false)
   const [reqRef, setReqRef] = useState('')
   const [reqTitle, setReqTitle] = useState('')
@@ -360,6 +363,9 @@ function ProjectDetailInner({ id }: { id: string }) {
   const [poDate, setPoDate] = useState('')
 
   const [showAddDoc, setShowAddDoc] = useState(false)
+  const [showUploadDoc, setShowUploadDoc] = useState(false)
+  const [uploadFile, setUploadFile] = useState<File | null>(null)
+  const [uploading, setUploading] = useState(false)
   const [docTitle, setDocTitle] = useState('')
   const [docType, setDocType] = useState('Specification (SOW)')
   const [docAiGenerated, setDocAiGenerated] = useState(false)
@@ -403,6 +409,7 @@ function ProjectDetailInner({ id }: { id: string }) {
     canDraftDeliverables(effectiveRole) &&
       (effectiveRole !== 'senior_dev_pm' || !currentUserAssignment?.approval_authority)
   )
+  const canUpload = canUploadDocuments(effectiveRole)
   const leadProfile = leadAssignment?.developer_user_id
     ? teamProfiles.find((member) => member.id === leadAssignment.developer_user_id)
     : undefined
@@ -485,13 +492,15 @@ function ProjectDetailInner({ id }: { id: string }) {
         .eq('client_id', proj.client_id)
       setClientContactCount(contactCount ?? 0)
 
-      // Discovery
-      const { data: d } = await supabase
-        .from('discovery_records')
-        .select('id, meeting_date, summary, notes, audio_url, transcript_ref, transcription_status, status, created_at')
+      // Discovery Session
+      const { data: ds } = await supabase
+        .from('discovery_sessions')
+        .select('*')
         .eq('project_id', id)
         .order('created_at', { ascending: false })
-      setDiscoveries((d ?? []) as Discovery[])
+        .limit(1)
+        .single()
+      setDiscoverySession(ds ?? null)
 
       // Requirements
       const { data: r } = await supabase
@@ -512,9 +521,7 @@ function ProjectDetailInner({ id }: { id: string }) {
       // Deposits
       const { data: dep } = await supabase
         .from('deposits')
-        .select(
-          'id, amount, currency, due_date, trigger, status, external_reference, verified_at, verified_by_provider'
-        )
+        .select('id, project_id, amount, currency, due_date, trigger, status, created_at')
         .eq('project_id', id)
         .order('created_at', { ascending: false })
       setDeposits((dep ?? []) as Deposit[])
@@ -522,9 +529,7 @@ function ProjectDetailInner({ id }: { id: string }) {
       // External payment confirmations (written by the payment webhook)
       const { data: confirmations } = await supabase
         .from('payment_confirmations')
-        .select(
-          'id, deposit_id, amount, reference, provider, external_reference, actor_type, confirmed_by, verified_at, created_at'
-        )
+        .select('id, deposit_id, amount, reference, confirmed_by, created_at')
         .eq('project_id', id)
         .order('created_at', { ascending: false })
       setPaymentConfirmations((confirmations ?? []) as PaymentConfirmation[])
@@ -537,15 +542,32 @@ function ProjectDetailInner({ id }: { id: string }) {
         .order('created_at', { ascending: false })
       setPurchaseOrders((po ?? []) as PurchaseOrder[])
 
-      // Documents
-      const { data: doc, error: docErr } = await supabase
+      // Documents — fetch separately from revisions to avoid relation-name issues
+      const { data: docs, error: docErr } = await supabase
         .from('documents')
-        .select('id, title, type, status, current_revision_id, sent_to_client_at, sent_to_client_by, created_at, document_revisions:document_revisions_document_id_fkey(*)')
+        .select('id, project_id, title, type, status, current_revision_id, created_at')
         .eq('project_id', id)
         .order('created_at', { ascending: false })
-      if (!docErr && doc) {
-        setDocuments(doc as unknown as DocumentRecord[])
+
+      let docsWithRevs = (docs ?? []) as DocumentRecord[]
+      if (docsWithRevs.length > 0) {
+        const docIds = docsWithRevs.map((d) => d.id)
+        const { data: revs } = await supabase
+          .from('document_revisions')
+          .select('*')
+          .in('document_id', docIds)
+        const revMap = new Map<string, DocumentRevision[]>()
+        for (const rev of (revs ?? [])) {
+          const arr = revMap.get(rev.document_id) ?? []
+          arr.push(rev as DocumentRevision)
+          revMap.set(rev.document_id, arr)
+        }
+        docsWithRevs = docsWithRevs.map((d) => ({
+          ...d,
+          document_revisions: revMap.get(d.id) ?? [],
+        }))
       }
+      setDocuments(docsWithRevs)
 
       // Readiness Check
       const { data: rc } = await supabase
@@ -560,9 +582,7 @@ function ProjectDetailInner({ id }: { id: string }) {
       // Project assignment matrix
       const { data: asgn } = await supabase
         .from('assignments')
-        .select(
-          'id, developer_user_id, assignment_role, approval_authority, is_active, assigned_at'
-        )
+        .select('id, project_id, developer_user_id, assignment_role, approval_authority, is_active, assigned_at')
         .eq('project_id', id)
         .eq('is_active', true)
         .order('assignment_role', { ascending: false })
@@ -648,14 +668,14 @@ function ProjectDetailInner({ id }: { id: string }) {
     const prevStage = project.stage
 
     if (newStage === 'development') {
-      const hasApprovedScope = discoveries.some((item) => item.status === 'approved')
+      const hasApprovedDiscovery = discoverySession?.generation_status === 'complete'
       const hasApprovedRequirements =
         requirements.some((item) => item.status === 'approved') ||
         documents.some((item) => item.status === 'approved' && (item.title.includes('Requirements') || item.title.includes('PRD')))
 
-      if (!hasApprovedScope || !hasApprovedRequirements || clientContactCount === 0) {
+      if (!hasApprovedDiscovery || !hasApprovedRequirements || clientContactCount === 0) {
         const missing: string[] = []
-        if (!hasApprovedScope) missing.push('an approved scope/discovery record')
+        if (!hasApprovedDiscovery) missing.push('an approved discovery meeting')
         if (!hasApprovedRequirements) missing.push('approved requirements')
         if (clientContactCount === 0) missing.push('at least one assigned client contact')
         setStatusMessage({ type: 'error', text: `Cannot advance to Development. Missing: ${missing.join(', ')}.` })
@@ -734,11 +754,12 @@ function ProjectDetailInner({ id }: { id: string }) {
     }
 
     // Auto-evaluate criteria based on actual project state
-    const hasApprovedScope = discoveries.some((item) => item.status === 'approved')
+    const hasApprovedDiscovery = discoverySession?.generation_status === 'complete'
     const hasApprovedReqDocs = documents.some(
       (d) => d.status === 'approved' && (d.title.includes('Requirements') || d.title.includes('PRD'))
     )
-    const hasApprovedRequirements = requirements.some((item) => item.status === 'approved') || hasApprovedReqDocs
+    const hasApprovedRequirements =
+      requirements.some((item) => item.status === 'approved') || hasApprovedReqDocs || hasApprovedDiscovery
     const hasVerifiedRepo = (currentDevLinks ?? []).some((link) =>
       Boolean(link.verified) && isRepositoryLink(link)
     )
@@ -748,44 +769,74 @@ function ProjectDetailInner({ id }: { id: string }) {
     }))
     const hasConfirmedDeposit = deposits.some((d) => d.status === 'paid')
 
+    // Robust document approval check: case-insensitive status + title keyword match
+    // with a fallback to the current revision's approval status.
+    const isDocApproved = (doc: DocumentRecord, keywords: string[]): boolean => {
+      const titleLower = doc.title.toLowerCase()
+      const titleMatch = keywords.some((kw) => titleLower.includes(kw.toLowerCase()))
+      if (!titleMatch) return false
+      // Primary: document row status contains "approved" (case-insensitive)
+      if (doc.status.toLowerCase().includes('approved')) return true
+      // Fallback: check if the current revision is approved
+      const currentRevision = getCurrentRevision(doc)
+      return Boolean(currentRevision?.status.toLowerCase().includes('approved'))
+    }
+
+    const hasApprovedSRS = documents.some(d =>
+      isDocApproved(d, ['srs', 'software requirements specification', 'requirements specification'])
+    )
+    const hasApprovedPRD = documents.some(d =>
+      isDocApproved(d, ['prd', 'product requirements document'])
+    )
+    const hasApprovedSLA = documents.some(d =>
+      isDocApproved(d, ['sla', 'service level agreement'])
+    )
+    const hasApprovedQuotation = documents.some(d =>
+      isDocApproved(d, ['quotation', 'proposal', 'quote'])
+    )
+
     const autoCriteria = [
       {
         criterion: 'SRS approved by Senior PM',
         mandatory: true,
         overridable: false,
-        result: documents.some(
-          (d) => d.status === 'approved' && d.title.toLowerCase().includes('software requirements specification')
-        ) ? 'passed' : 'outstanding',
+        result: hasApprovedSRS ? 'passed' : 'outstanding',
       },
       {
         criterion: 'PRD approved by Senior PM',
         mandatory: true,
         overridable: false,
-        result: documents.some(
-          (d) => d.status === 'approved' && d.title.toLowerCase().includes('product requirements document')
-        ) ? 'passed' : 'outstanding',
+        result: hasApprovedPRD ? 'passed' : 'outstanding',
       },
       {
         criterion: 'SLA approved by Senior PM',
         mandatory: true,
         overridable: false,
-        result: documents.some(
-          (d) => d.status === 'approved' && (d.title.toLowerCase().includes('service level agreement') || d.type === 'Service Agreement')
-        ) ? 'passed' : 'outstanding',
+        result: hasApprovedSLA ? 'passed' : 'outstanding',
       },
       {
         criterion: 'Quotation approved by Senior PM',
         mandatory: true,
         overridable: false,
-        result: documents.some(
-          (d) => d.status === 'approved' && (d.type === 'Quotation' || d.title.toLowerCase().includes('quotation') || d.title.toLowerCase().includes('proposal'))
-        ) ? 'passed' : 'outstanding',
+        result: hasApprovedQuotation ? 'passed' : 'outstanding',
       },
       {
-        criterion: 'Initial milestone deposit paid and confirmed',
+        criterion: 'SLA Signed by Client',
         mandatory: true,
-        overridable: true,
-        result: hasConfirmedDeposit ? 'passed' : 'outstanding',
+        overridable: false,
+        result: 'outstanding',
+      },
+      {
+        criterion: 'Initial Deposit Paid',
+        mandatory: true,
+        overridable: false,
+        result: 'outstanding',
+      },
+      {
+        criterion: 'Final Payment Paid',
+        mandatory: true,
+        overridable: false,
+        result: 'outstanding',
       },
       {
         criterion: 'Source repository initialized and verified',
@@ -795,27 +846,9 @@ function ProjectDetailInner({ id }: { id: string }) {
       },
       {
         criterion: 'Client technical contact assigned',
-        mandatory: true,
-        overridable: false,
-        result: clientContactCount > 0 ? 'passed' : 'outstanding',
-      },
-      {
-        criterion: 'Payment Received',
-        mandatory: true,
-        overridable: false,
-        result: hasConfirmedDeposit ? 'passed' : 'outstanding',
-      },
-      {
-        criterion: 'Signed SLA',
-        mandatory: true,
-        overridable: false,
-        result: documents.some(
-          (d) =>
-            d.status === 'signed' &&
-            (d.title.toLowerCase().includes('service level agreement') ||
-              d.type === 'Service Agreement' ||
-              d.type === 'SLA')
-        ) ? 'passed' : 'outstanding',
+        mandatory: false,
+        overridable: true,
+        result: 'outstanding',
       },
     ]
 
@@ -866,6 +899,17 @@ function ProjectDetailInner({ id }: { id: string }) {
       return
     }
 
+    console.log('[Readiness Debug]', {
+      hasApprovedSRS,
+      hasApprovedPRD,
+      hasApprovedSLA,
+      hasApprovedQuotation,
+      hasVerifiedRepo,
+      hasConfirmedDeposit,
+      documentCount: documents.length,
+      docs: documents.map(d => ({ id: d.id, title: d.title, status: d.status })),
+    })
+
     const { data: insertedItems, error: itemsErr } = await supabase.from('readiness_items').insert(
       autoCriteria.map((c) => ({
         readiness_check_id: readinessCheckId,
@@ -882,7 +926,6 @@ function ProjectDetailInner({ id }: { id: string }) {
        return
     }
 
-    setSubmitting(false)
     setStatusMessage({ type: 'success', text: 'Readiness checklist generated and auto-evaluated.' })
     
     // Manually update local state instantly to prevent UI disappearing
@@ -893,17 +936,18 @@ function ProjectDetailInner({ id }: { id: string }) {
     })
 
     await refreshAllProjectData()
+    setSubmitting(false)
   }
 
   const automaticReadinessSignature = useMemo(() => JSON.stringify([
-    discoveries.some((item) => item.status === 'approved'),
+    discoverySession?.generation_status === 'complete',
     requirements.some((item) => item.status === 'approved') || documents.some((item) =>
       item.status === 'approved' && (item.title.includes('Requirements') || item.title.includes('PRD'))
     ),
     devLinks.some((link) => isRepositoryLink(link) && link.verified),
     deposits.some((deposit) => deposit.status === 'paid'),
     clientContactCount > 0,
-  ]), [discoveries, requirements, documents, devLinks, deposits, clientContactCount])
+  ]), [discoverySession?.generation_status, requirements, documents, devLinks, deposits, clientContactCount])
 
   const savedReadinessSignature = useMemo(() => JSON.stringify(
     (readinessCheck?.readiness_items ?? []).map((item) =>
@@ -925,113 +969,6 @@ function ProjectDetailInner({ id }: { id: string }) {
     canApprove,
     project,
   ])
-
-  async function startRecording() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
-      const chunks: Blob[] = []
-
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunks.push(e.data)
-      }
-      
-      recorder.onstop = () => {
-        const blob = new Blob(chunks, { type: 'audio/webm' })
-        setAudioBlob(blob)
-      }
-
-      recorder.start()
-      setMediaRecorder(recorder)
-      setIsRecording(true)
-    } catch (err) {
-      setStatusMessage({ type: 'error', text: 'Microphone access denied or not available.' })
-    }
-  }
-
-  function stopRecording() {
-    if (mediaRecorder) {
-      mediaRecorder.stop()
-      setIsRecording(false)
-      mediaRecorder.stream.getTracks().forEach(track => track.stop())
-    }
-  }
-
-  function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    if (file) setAudioBlob(file)
-  }
-
-  async function handleAddDiscovery(e: React.FormEvent) {
-    e.preventDefault()
-    if (!canDraft) {
-      setStatusMessage({ type: 'error', text: 'You do not have permission to add discovery notes.' })
-      return
-    }
-    if (!discSummary.trim() && !discNotes.trim() && !audioBlob) {
-      setStatusMessage({ type: 'error', text: 'A summary, detailed notes, or an audio file is required.' })
-      return
-    }
-    
-    setSubmitting(true)
-    let publicUrl = null
-
-    try {
-      if (audioBlob) {
-        setIsUploadingAudio(true)
-        const fileName = `${id}-${Date.now()}.webm`
-        const { data: uploadData, error: uploadError } = await supabase.storage
-          .from('discovery-media')
-          .upload(fileName, audioBlob, { contentType: 'audio/webm' })
-
-        if (uploadError) throw new Error('Audio upload failed: ' + uploadError.message)
-
-        const { data: { publicUrl: url } } = supabase.storage
-          .from('discovery-media')
-          .getPublicUrl(fileName)
-        
-        publicUrl = url
-      }
-
-      const { data: dbRecord, error: dbError } = await supabase.from('discovery_records').insert({
-        project_id: id,
-        meeting_date: discDate || null,
-        summary: discSummary.trim() || null,
-        notes: discNotes.trim() || null,
-        audio_url: publicUrl,
-        transcription_status: publicUrl ? 'pending' : null,
-        status: 'pending_review',
-        created_by: user?.id,
-      }).select().single()
-
-      if (dbError) throw new Error(dbError.message)
-
-      if (publicUrl && dbRecord) {
-        fetch('/api/transcribe', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ audioUrl: publicUrl, recordId: dbRecord.id })
-        }).catch(err => console.error('Transcription request failed', err))
-      }
-
-      setDiscDate('')
-      setDiscSummary('')
-      setDiscNotes('')
-      setAudioBlob(null)
-      setShowAddDiscovery(false)
-      setStatusMessage({ 
-        type: 'success', 
-        text: publicUrl ? 'Discovery saved. Transcribing audio in the background...' : 'Discovery record saved.' 
-      })
-      await refreshAllProjectData()
-
-    } catch (err: any) {
-      setStatusMessage({ type: 'error', text: err.message })
-    } finally {
-      setSubmitting(false)
-      setIsUploadingAudio(false)
-    }
-  }
 
   async function handleAddRequirement(e: React.FormEvent) {
     e.preventDefault()
@@ -1235,6 +1172,43 @@ function ProjectDetailInner({ id }: { id: string }) {
     await refreshAllProjectData()
   }
 
+  async function handleUploadDocument(e: React.FormEvent) {
+    e.preventDefault()
+    if (!uploadFile) {
+      setStatusMessage({ type: 'error', text: 'Please select a PDF file to upload.' })
+      return
+    }
+    setUploading(true)
+    setStatusMessage(null)
+
+    try {
+      const formData = new FormData()
+      formData.append('file', uploadFile)
+      formData.append('documentId', editingDocId || '')
+      formData.append('projectId', id)
+
+      const res = await fetch('/api/documents/upload', {
+        method: 'POST',
+        body: formData,
+      })
+
+      const data = await res.json()
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to upload document')
+      }
+
+      setStatusMessage({ type: 'success', text: `PDF uploaded as revision #${data.revisionNo}. Pending review.` })
+      setShowUploadDoc(false)
+      setUploadFile(null)
+      await refreshAllProjectData()
+    } catch (err: any) {
+      setStatusMessage({ type: 'error', text: err.message || 'Upload failed' })
+    } finally {
+      setUploading(false)
+    }
+  }
+
   function handleOpenDocument(doc: DocumentRecord) {
     const revision = getCurrentRevision(doc)
     setEditingDocId(doc.id)
@@ -1372,25 +1346,40 @@ function ProjectDetailInner({ id }: { id: string }) {
       return
     }
 
-    if (!window.confirm('Send this document to the client via Sister System? It will be pushed to the external deliverables endpoint and marked as Sent to Client.')) return
+    if (!window.confirm('Send this document to the client? It will be pushed to the Sister System.')) return
 
     setSubmitting(true)
+
     try {
-      const res = await fetch('/api/outbox/send', {
+      // 1. Call the Outbox API (creates outbox_messages row + validates permissions)
+      const response = await fetch('/api/outbox/send-documents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ documentId: docId, projectId: doc.project_id }),
+        body: JSON.stringify({ documentId: docId, projectId: id })
       })
 
-      const data = await res.json()
-
-      if (!res.ok) {
-        setStatusMessage({ type: 'error', text: data.error || 'Could not send document to Sister System.' })
-        return
+      if (!response.ok) {
+        const data = await response.json()
+        throw new Error(data.error || 'Failed to send to Sister System')
       }
 
-      setStatusMessage({ type: 'success', text: 'Document pushed to Sister System and marked as Sent to Client.' })
+      // 2. Best-effort: update local documents table status (may be blocked by RLS)
+      const { error: dbError } = await supabase.from('documents').update({
+        status: 'sent_to_client',
+        sent_to_client_at: new Date().toISOString(),
+        sent_to_client_by: user?.id,
+      }).eq('id', docId)
+
+      if (dbError) {
+        console.warn('Client-side document status update blocked by RLS:', dbError.message)
+        // Don't throw — the outbox_messages row was already created by the API
+      }
+
+      setStatusMessage({ type: 'success', text: 'Document queued for Sister System and marked as Sent to Client.' })
       await refreshAllProjectData()
+
+    } catch (err: any) {
+      setStatusMessage({ type: 'error', text: err.message })
     } finally {
       setSubmitting(false)
     }
@@ -1423,6 +1412,76 @@ function ProjectDetailInner({ id }: { id: string }) {
     }
 
     await refreshAllProjectData()
+  }
+
+  async function handleApproveDiscovery() {
+    if (!discoverySession) return
+    if (!canApprove) {
+      setStatusMessage({ type: 'error', text: 'Only the project’s assigned approver can approve discovery.' })
+      return
+    }
+    if (!discoverySession.transcript) {
+      setStatusMessage({ type: 'error', text: 'No discovery transcript found. Please record or add a transcript first.' })
+      return
+    }
+
+    setSubmitting(true)
+    setStatusMessage(null)
+
+    try {
+      const res = await fetch('/api/discovery/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: discoverySession.id }),
+      })
+
+      const data = await res.json()
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Approval processing failed')
+      }
+
+      setStatusMessage({ type: 'success', text: 'Discovery Approved. Client profile created. You can now manually generate PRD and SRS documents in the Documents tab.' })
+      await refreshAllProjectData()
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error'
+      setStatusMessage({ type: 'error', text: msg })
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function handleGenerateDocument(documentType: 'prd' | 'requirements' | 'quotation') {
+    if (!canDraft) {
+      setStatusMessage({ type: 'error', text: 'You do not have permission to generate documents.' })
+      return
+    }
+
+    setSubmitting(true)
+    setStatusMessage(null)
+
+    try {
+      const res = await fetch('/api/generate-document', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId: id, documentType }),
+      })
+
+      const data = await res.json()
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to generate document')
+      }
+
+      const typeLabels = { prd: 'PRD', requirements: 'SRS', quotation: 'Quotation' }
+      setStatusMessage({ type: 'success', text: `${typeLabels[documentType]} generated as Revision #1. Pending review.` })
+      await refreshAllProjectData()
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error'
+      setStatusMessage({ type: 'error', text: msg })
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   async function handleSaveHandover(e: React.FormEvent) {
@@ -1565,6 +1624,13 @@ function ProjectDetailInner({ id }: { id: string }) {
                 </div>
               </div>
 
+              {discoverySession && (
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button type="button" className="portal-btn-secondary" style={{ height: 30, fontSize: 11 }} onClick={() => router.push(`/discovery/${discoverySession.id}`)}>
+                    View Discovery Meeting
+                  </button>
+                </div>
+              )}
               <div className="portal-stepper">
                 {PROJECT_STAGES.map((stg, i) => {
                   const isDone = i < currentStageIndex
@@ -1607,7 +1673,7 @@ function ProjectDetailInner({ id }: { id: string }) {
 
             <div className="portal-tabs">
               <button type="button" className={`portal-tab-btn ${activeTab === 'discovery' ? 'active' : ''}`} onClick={() => setActiveTab('discovery')}>
-                <span>🔍 Discovery</span><span className="portal-tab-count">{discoveries.length}</span>
+                <span>🔍 Discovery</span><span className="portal-tab-count">{discoverySession ? 1 : 0}</span>
               </button>
               <button type="button" className={`portal-tab-btn ${activeTab === 'documents' ? 'active' : ''}`} onClick={() => setActiveTab('documents')}>
                 <span>📄 Documents</span><span className="portal-tab-count">{documents.length}</span>
@@ -1620,107 +1686,58 @@ function ProjectDetailInner({ id }: { id: string }) {
               </button>
             </div>
 
-            {activeTab === 'discovery' && (
-              <div className="portal-card">
-                <div className="portal-card-header">
-                  <div>
-                    <h3>Discovery Sessions ({discoveries.length})</h3>
-                    <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>Notes, audio recordings, and AI transcripts from client briefing sessions.</p>
-                  </div>
-                  {canDraft && !showAddDiscovery && (
-                    <button type="button" className="portal-btn-primary" style={{ height: 34, fontSize: 12 }} onClick={() => setShowAddDiscovery(true)}>
-                      <span>+</span> Add Discovery Record
-                    </button>
+
+
+
+
+
+
+        {activeTab === 'discovery' && discoverySession && (
+          <div className="portal-card">
+            <div className="portal-card-header">
+              <div>
+                <h3>Discovery Meeting</h3>
+                <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>
+                  {discoverySession.id ? (
+                    <span className={`portal-badge badge-${discoverySession.generation_status === 'complete' ? 'badge-green' : discoverySession.generation_status === 'failed' ? 'badge-amber' : 'badge-purple'}`}>
+                      {discoverySession.generation_status === 'pending' ? 'Pending Review' : discoverySession.generation_status === 'failed' ? 'Rejected' : 'Approved'}
+                    </span>
+                  ) : (
+                    <span className="portal-badge badge-amber">Not Available</span>
                   )}
+                </p>
                 </div>
-
-                {showAddDiscovery && canDraft && (
-                  <form onSubmit={handleAddDiscovery} style={{ background: '#f8fafc', padding: 18, borderRadius: 10, marginBottom: 18 }}>
-                    <div style={{ display: 'grid', gap: 12 }}>
-                      <input type="date" className="form-input" value={discDate} onChange={(e) => setDiscDate(e.target.value)} />
-                      <input className="form-input" placeholder="Session Summary / Key Decisions *" value={discSummary} onChange={(e) => setDiscSummary(e.target.value)} />
-                      <textarea className="form-input" style={{ minHeight: 70 }} placeholder="Detailed meeting notes..." value={discNotes} onChange={(e) => setDiscNotes(e.target.value)} />
-                      
-                      <div style={{ border: '1px dashed #cbd5e1', padding: 16, borderRadius: 10, background: '#fff' }}>
-                        <h4 style={{ margin: '0 0 10px', fontSize: 14 }}>Attach Audio / Voice Note (Optional)</h4>
-                        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-                          {!isRecording ? (
-                            <button type="button" onClick={startRecording} className="portal-btn-secondary">🎤 Start Recording</button>
-                          ) : (
-                            <button type="button" onClick={stopRecording} className="auth-alert-error" style={{ padding: '8px 16px' }}>⏹ Stop Recording</button>
-                          )}
-                          <span style={{ fontSize: 12, color: '#64748b' }}>OR</span>
-                          <input type="file" accept="audio/*,video/*" onChange={handleFileUpload} style={{ fontSize: 12 }} />
-                        </div>
-                        {audioBlob && (
-                          <div style={{ marginTop: 12 }}>
-                            <audio controls src={URL.createObjectURL(audioBlob)} style={{ width: '100%' }} />
-                            <p style={{ fontSize: 11, color: '#10b981', marginTop: 4 }}>✓ Audio ready to upload</p>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
-                      <button type="button" className="portal-btn-secondary" onClick={() => { setShowAddDiscovery(false); setAudioBlob(null); }}>Cancel</button>
-                      <button type="submit" className="portal-btn-primary" disabled={submitting}>
-                        {submitting ? (isUploadingAudio ? 'Uploading Audio...' : 'Saving...') : 'Save Record'}
-                      </button>
-                    </div>
-                  </form>
-                )}
-
-                {discoveries.length === 0 ? (
-                  <div className="portal-empty-state"><p className="portal-empty-title">No discovery records recorded yet</p></div>
-                ) : (
-                  <div style={{ display: 'grid', gap: 10 }}>
-                    {discoveries.map((disc) => (
-                      <div key={disc.id} style={{ border: '1px solid #e8ecf3', padding: 14, borderRadius: 8, background: '#fff' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 10 }}>
-                          <div>
-                            <span className="code-badge" style={{ marginBottom: 6, display: 'inline-block' }}>{disc.meeting_date || 'No Date'}</span>
-                            <strong style={{ fontSize: 14, display: 'block' }}>{disc.summary}</strong>
-                          </div>
-                          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                            {disc.transcription_status === 'pending' && (<span className="portal-badge badge-amber">⏳ Transcribing Audio...</span>)}
-                            {disc.transcription_status === 'failed' && (<span className="portal-badge badge-amber" style={{ background: '#fee2e2', color: '#991b1b' }}>❌ Transcription Failed</span>)}
-                            {disc.status !== 'approved' && (<span className="portal-badge badge-amber">⏳ Pending Senior Review</span>)}
-                            {disc.status === 'approved' && (<span className="portal-badge badge-green">✓ Approved</span>)}
-                          </div>
-                        </div>
-                        
-                        {disc.notes && <p style={{ fontSize: 13, color: '#64748b', marginTop: 8 }}>{disc.notes}</p>}
-                        
-                        {disc.audio_url && (
-                          <div style={{ marginTop: 10, padding: 10, background: '#f8fafc', borderRadius: 8 }}>
-                            <audio controls src={disc.audio_url} style={{ width: '100%', height: 36 }} />
-                          </div>
-                        )}
-
-                        {disc.transcript && (
-                          <div style={{ marginTop: 10, padding: 12, background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, position: 'relative' }}>
-                            <strong style={{ fontSize: 12, color: '#166534', display: 'block', marginBottom: 4 }}>AI Transcript:</strong>
-                            <p style={{ fontSize: 13, color: '#14532d', margin: 0, lineHeight: 1.5 }}>{disc.transcript}</p>
-                          </div>
-                        )}
-
-                        {canApprove && disc.status !== 'approved' && (
-                          <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #e8ecf3', display: 'flex', justifyContent: 'flex-end' }}>
-                            <button type="button" className="portal-btn-primary" style={{ height: 30, fontSize: 12 }} onClick={async () => {
-                              await supabase.from('discovery_records').update({ status: 'approved' }).eq('id', disc.id);
-                              setStatusMessage({ type: 'success', text: 'Discovery record approved.' });
-                              await refreshAllProjectData();
-                            }}>Approve Discovery ✓</button>
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                <div style={{ display: 'flex', gap: 12, padding: 20 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>Meeting Title</div>
+                    <p style={{ fontSize: 13, color: '#1e293b', margin: 0 }}>{discoverySession.meeting_title || '—'}</p>
                   </div>
-                )}
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>Meeting Date</div>
+                    <p style={{ fontSize: 13, color: '#1e293b', margin: 0 }}>{discoverySession.meeting_date || '—'}</p>
+                  </div>
+                </div>
+              </div>
+            {discoverySession.transcript && (
+              <div style={{ marginTop: 20, padding: 16, background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8 }}>
+                <strong style={{ fontSize: 12, color: '#166534', display: 'block', marginBottom: 4 }}>Discovery Transcript:</strong>
+                <p style={{ fontSize: 13, color: '#14532d', margin: 0, lineHeight: 1.6 }}>{discoverySession.transcript}</p>
               </div>
             )}
-
-            {activeTab === 'documents' && (
-              <div className="portal-card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 20 }}>
+              <button type="button" className="portal-btn-secondary" style={{ height: 40, padding: '0 24px', fontSize: 14 }} onClick={() => router.push(`/discovery/${discoverySession.id}`)}>
+                View Full Discovery Page →
+              </button>
+              {canApprove && discoverySession.generation_status !== 'complete' && discoverySession.transcript && (
+                <button type="button" className="portal-btn-primary" style={{ height: 40, padding: '0 24px', fontSize: 14 }} onClick={handleApproveDiscovery} disabled={submitting}>
+                  {submitting ? 'Approving...' : '✓ Approve Discovery →'}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+        {activeTab === 'documents' && (
+          <div className="portal-card">
                 <div className="portal-card-header">
                   <div>
                     <h3>Document Governance & Approvals ({documents.length})</h3>
@@ -1728,108 +1745,54 @@ function ProjectDetailInner({ id }: { id: string }) {
                   </div>
                   {canDraft && !showAddDoc && (
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                      <button 
-                        type="button" 
-                        className="portal-btn-secondary" 
-                        style={{ height: 34, fontSize: 12, background: '#f3e8ff', color: '#6b21a8', border: '1px solid #d8b4fe' }} 
-                        onClick={async () => {
-                          setSubmitting(true);
-                          setStatusMessage({ type: 'success', text: 'AI is generating the SLA...' });
-                          try {
-                            const res = await fetch('/api/generate-document', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId: id, documentType: 'sla' }) });
-                            const data = await res.json();
-                            if (!res.ok) throw new Error(data.error);
-                            setStatusMessage({ type: 'success', text: 'AI SLA generated! Review it below.' });
-                            await refreshAllProjectData();
-                          } catch (err: any) {
-                            setStatusMessage({ type: 'error', text: err.message });
-                          } finally {
-                            setSubmitting(false);
-                          }
-                        }}
-                        disabled={submitting}
+                      <button
+                        type="button"
+                        className="portal-btn-secondary"
+                        style={{ height: 34, fontSize: 12, background: '#f3e8ff', color: '#6b21a8', border: '1px solid #d8b4fe' }}
+                        onClick={() => { setEditingDocId(null); setShowAddDoc(true); }}
                       >
-                        ✨ AI Generate SLA
-                      </button>
-                      
-                      <button 
-                        type="button" 
-                        className="portal-btn-secondary" 
-                        style={{ height: 34, fontSize: 12, background: '#f3e8ff', color: '#6b21a8', border: '1px solid #d8b4fe' }} 
-                        onClick={async () => {
-                          setSubmitting(true);
-                          setStatusMessage({ type: 'success', text: 'AI is generating the PRD...' });
-                          try {
-                            const res = await fetch('/api/generate-document', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId: id, documentType: 'prd' }) });
-                            const data = await res.json();
-                            if (!res.ok) throw new Error(data.error);
-                            setStatusMessage({ type: 'success', text: 'AI PRD generated! Review it below.' });
-                            await refreshAllProjectData();
-                          } catch (err: any) {
-                            setStatusMessage({ type: 'error', text: err.message });
-                          } finally {
-                            setSubmitting(false);
-                          }
-                        }}
-                        disabled={submitting}
-                      >
-                        ✨ AI Generate PRD
-                      </button>
-
-                      <button 
-                        type="button" 
-                        className="portal-btn-secondary" 
-                        style={{ height: 34, fontSize: 12, background: '#f3e8ff', color: '#6b21a8', border: '1px solid #d8b4fe' }} 
-                        onClick={async () => {
-                          setSubmitting(true);
-                          setStatusMessage({ type: 'success', text: 'AI is generating the SRS (Requirements)...' });
-                          try {
-                            const res = await fetch('/api/generate-document', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId: id, documentType: 'requirements' }) });
-                            const data = await res.json();
-                            if (!res.ok) throw new Error(data.error);
-                            setStatusMessage({ type: 'success', text: 'AI SRS generated! Review it below.' });
-                            await refreshAllProjectData();
-                          } catch (err: any) {
-                            setStatusMessage({ type: 'error', text: err.message });
-                          } finally {
-                            setSubmitting(false);
-                          }
-                        }}
-                        disabled={submitting}
-                      >
-                        ✨ AI Generate SRS
-                      </button>
-
-                      <button type="button" className="portal-btn-primary" style={{ height: 34, fontSize: 12 }} onClick={() => { setEditingDocId(null); setShowAddDoc(true); }}>
                         <span>+</span> Manual Document
                       </button>
 
-                      <button 
-                        type="button" 
-                        className="portal-btn-secondary" 
-                        style={{ height: 34, fontSize: 12, background: '#f3e8ff', color: '#6b21a8', border: '1px solid #d8b4fe' }} 
-                        onClick={async () => {
-                          setSubmitting(true);
-                          setStatusMessage({ type: 'success', text: 'AI is writing your quotation... This may take 10 seconds.' });
-                          try {
-                            const res = await fetch('/api/generate-document', {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ projectId: id, documentType: 'quotation' })
-                            });
-                            const data = await res.json();
-                            if (!res.ok) throw new Error(data.error);
-                            setStatusMessage({ type: 'success', text: 'AI Quotation generated! Check the Documents tab to review it.' });
-                            await refreshAllProjectData();
-                          } catch (err: any) {
-                            setStatusMessage({ type: 'error', text: err.message });
-                          } finally {
-                            setSubmitting(false);
-                          }
-                        }}
+                      {canUpload && (
+                        <button
+                          type="button"
+                          className="portal-btn-secondary"
+                          style={{ height: 34, fontSize: 12, background: '#f0fdf4', color: '#166534', border: '1px solid #86efac' }}
+                          onClick={() => { setShowUploadDoc(true); }}
+                        >
+                          <span>📎</span> Upload PDF
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        className="portal-btn-secondary"
+                        style={{ height: 34, fontSize: 12, background: '#faf5ff', color: '#6b21a8', border: '1px solid #d8b4fe' }}
+                        onClick={() => handleGenerateDocument('requirements')}
                         disabled={submitting}
                       >
-                        ✨ AI Generate Quotation
+                        <span>✨</span> AI Generate SRS
+                      </button>
+
+                      <button
+                        type="button"
+                        className="portal-btn-secondary"
+                        style={{ height: 34, fontSize: 12, background: '#faf5ff', color: '#6b21a8', border: '1px solid #d8b4fe' }}
+                        onClick={() => handleGenerateDocument('prd')}
+                        disabled={submitting}
+                      >
+                        <span>✨</span> AI Generate PRD
+                      </button>
+
+                      <button
+                        type="button"
+                        className="portal-btn-secondary"
+                        style={{ height: 34, fontSize: 12, background: '#faf5ff', color: '#6b21a8', border: '1px solid #d8b4fe' }}
+                        onClick={() => handleGenerateDocument('quotation')}
+                        disabled={submitting}
+                      >
+                        <span>✨</span> AI Generate Quotation
                       </button>
                     </div>
                   )}
@@ -1855,104 +1818,74 @@ function ProjectDetailInner({ id }: { id: string }) {
                         <input type="checkbox" checked={docDraftAiGenerated} onChange={(e) => setDocDraftAiGenerated(e.target.checked)} disabled={!canDraft} />
                         🤖 AI-Generated Draft
                       </label>
-                      {canDraft ? (
-                        <button type="submit" className="portal-btn-primary" disabled={submitting}>
-                          {submitting ? 'Saving...' : `Submit Draft Revision #${editingNextRevisionNo}`}
-                        </button>
-                      ) : (
-                        <span className="portal-badge badge-gray">Read-only</span>
-                      )}
                     </div>
                   </form>
-                )}
+                  )}
 
-                {showAddDoc && canDraft && (
-                  <form onSubmit={handleAddDocument} style={{ background: '#f8fafc', padding: 18, borderRadius: 10, marginBottom: 18 }}>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
-                      <input className="form-input" placeholder="Document Title *" value={docTitle} onChange={(e) => setDocTitle(e.target.value)} required />
-                      <select className="form-input" value={docType} onChange={(e) => setDocType(e.target.value)}>
-                        <option value="Specification (SOW)">Specification (SOW)</option>
-                        <option value="Technical Architecture">Technical Architecture</option>
-                        <option value="Handover Dossier">Handover Dossier</option>
-                        <option value="Service Agreement">Service Agreement</option>
-                        <option value="Quotation">Quotation</option>
-                      </select>
-                      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#475569', cursor: 'pointer' }}>
-                        <input type="checkbox" checked={docAiGenerated} onChange={(e) => setDocAiGenerated(e.target.checked)} />
-                        🤖 AI-Generated Draft
-                      </label>
+                  {documents.length === 0 ? (
+                    <div className="portal-empty-state">
+                      <div className="portal-empty-icon">📄</div>
+                      <p className="portal-empty-title">No documents uploaded or created yet</p>
+                      <p style={{ fontSize: 12, color: '#64748b', marginTop: 8 }}>
+                        Create a document to get started, or upload a PDF.
+                      </p>
                     </div>
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
-                      <button type="button" className="portal-btn-secondary" onClick={() => setShowAddDoc(false)}>Cancel</button>
-                      <button type="submit" className="portal-btn-primary" disabled={submitting}>Create Document</button>
-                    </div>
-                  </form>
-                )}
-
-                {documents.length === 0 ? (
-                  <div className="portal-empty-state"><p className="portal-empty-title">No documents uploaded or created yet</p></div>
-                ) : (
-                  <table className="portal-table">
-                    <thead><tr><th>Document Title</th><th>Type</th><th>Revision</th><th>Origin</th><th>Status</th>{canApprove && <th>Sign-off</th>}<th>Action</th></tr></thead>
-                    <tbody>
-                      {documents.map((doc) => {
-                        const rev = getCurrentRevision(doc)
-                        const effectiveStatus = doc.status === 'sent_to_client' ? 'sent_to_client' : rev?.status || doc.status
-                        return (
-                          <tr key={doc.id}>
-                            <td>
-                              <button type="button" className="portal-table-link" style={{ background: 'none', border: 0, padding: 0, fontFamily: 'inherit', fontSize: 'inherit', cursor: 'pointer', textAlign: 'left' }} onClick={() => handlePreviewDocument(doc)}>
-                                {doc.title}
-                              </button>
-                            </td>
-                            <td><span className="portal-badge badge-gray">{doc.type}</span></td>
-                            <td><span className="code-badge">{rev ? `Rev ${rev.revision_no}` : 'No revision'}</span></td>
-                            <td>
-                              {!rev ? (
-                                <span className="portal-badge badge-gray">—</span>
-                              ) : rev.ai_generated ? (
-                                <span className="portal-badge badge-purple" title={`Generated ${formatGeneratedAt(rev.ai_generated_at || rev.created_at)}`}>
-                                  🤖 AI Origin · {formatAiOrigin(rev.ai_model, rev.ai_model_version)}
-                                </span>
-                              ) : (
-                                <span className="portal-badge badge-gray">✍️ Manual</span>
-                              )}
-                            </td>
-                            <td><span className={documentStatusBadgeClass(effectiveStatus)}>{formatDocumentStatus(effectiveStatus, Boolean(rev?.ai_generated), doc.type)}</span></td>
-                            {canApprove && (
+                  ) : (
+                    <table className="portal-table">
+                      <thead>
+                        <tr>
+                          <th>Document</th>
+                          <th>Status</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {documents.map((doc) => {
+                          const rev = getCurrentRevision(doc)
+                          return (
+                            <tr key={doc.id}>
+                              <td>
+                                <div>
+                                  <strong>{doc.title}</strong>
+                                  <p style={{ margin: '4px 0 0', fontSize: 11, color: '#64748b' }}>
+                                    {doc.type} · {doc.created_at ? new Date(doc.created_at).toLocaleDateString() : ''}
+                                  </p>
+                                </div>
+                              </td>
                               <td>
                                 {doc.status === 'sent_to_client' ? (
                                   <span className="portal-badge badge-blue">Sent</span>
-                                ) : effectiveStatus === 'approved' ? (
-                                  // ONLY show "Send to Client" for Quotation and SLA (Service Agreement)
-                                  doc.type === 'Quotation' || doc.type === 'Service Agreement' ? (
-                                    <button type="button" className="portal-btn-primary" style={{ height: 28, fontSize: 11 }} onClick={() => handleSendToClient(doc.id)}>Send to Client</button>
-                                  ) : doc.type === 'Prompt File' ? (
-                                    <span className="portal-badge badge-green">Internal Only</span>
-                                  ) : (
-                                    <span className="portal-badge badge-green">Approved</span>
-                                  )
+                                ) : doc.status === 'approved' ? (
+                                  <span className="portal-badge badge-green">Approved</span>
                                 ) : rev ? (
                                   <button type="button" className="portal-btn-primary" style={{ height: 28, fontSize: 11 }} onClick={() => handlePreviewDocument(doc)}>Review</button>
                                 ) : (
                                   <span className="portal-badge badge-gray">No draft</span>
                                 )}
                               </td>
-                            )}
-                            <td>
-                              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                                <button type="button" className="portal-btn-secondary" style={{ height: 28, fontSize: 11 }} onClick={() => handlePreviewDocument(doc)}>Preview</button>
-                                {canDraft && (
-                                  <button type="button" className="portal-btn-secondary" style={{ height: 28, fontSize: 11 }} onClick={() => handleOpenDocument(doc)}>Draft</button>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
-                )}
+                              <td>
+                                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                  <button type="button" className="portal-btn-secondary" style={{ height: 28, fontSize: 11 }} onClick={() => handlePreviewDocument(doc)}>Preview</button>
+                                  {canDraft && (
+                                    <button type="button" className="portal-btn-secondary" style={{ height: 28, fontSize: 11 }} onClick={() => handleOpenDocument(doc)}>Draft</button>
+                                  )}
+                                  {rev && (
+                                    <a
+                                      href={`/api/documents/download?revisionId=${rev.id}`}
+                                      rel="noreferrer"
+                                      target="_blank"
+                                    >
+                                      <button type="button" className="portal-btn-secondary" style={{ height: 28, fontSize: 11 }}>Download</button>
+                                    </a>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  )}
               </div>
             )}
 
@@ -1962,11 +1895,29 @@ function ProjectDetailInner({ id }: { id: string }) {
                   <div className="portal-card-header">
                     <div>
                       <h3>Pre-Development Readiness Checklist</h3>
-                      <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>Mandatory compliance check before promoting project to Development.</p>
+                      <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>
+                        Mandatory compliance check before promoting project to Development.
+                      </p>
                     </div>
+                    {canApprove && (
+                      <button 
+                        type="button" 
+                        className="portal-btn-primary" 
+                        style={{ height: 34, fontSize: 12 }} 
+                        onClick={handleInitializeReadiness}
+                        disabled={submitting}
+                      >
+                        <span>⚙</span> {submitting ? 'Evaluating...' : (readinessCheck ? 'Re-evaluate Checklist' : 'Run Readiness Check')}
+                      </button>
+                    )}
                   </div>
 
-                  {!readinessCheck ? (
+                  {submitting ? (
+                    <div className="portal-empty-state">
+                      <div className="portal-empty-icon">⏳</div>
+                      <p className="portal-empty-title">Evaluating readiness criteria...</p>
+                    </div>
+                  ) : !readinessCheck ? (
                     <div className="portal-empty-state">
                       <p className="portal-empty-title">Readiness checklist has not been generated</p>
                     </div>
@@ -2177,6 +2128,13 @@ function ProjectDetailInner({ id }: { id: string }) {
                 </header>
 
                 <div className="portal-drawer-body">
+                  {previewRevision?.source === 'uploaded' && (
+                    <div className="portal-ai-origin">
+                      <span className="portal-badge badge-blue">📎 Uploaded</span>
+                      <span className="portal-ai-origin-file">{previewRevision.uploaded_file_name}</span>
+                      <span className="portal-ai-origin-time">Uploaded {formatGeneratedAt(previewRevision.created_at)}</span>
+                    </div>
+                  )}
                   {previewRevision?.ai_generated && (
                     <div className="portal-ai-origin">
                       <span className="portal-badge badge-purple">🤖 AI Origin</span>
@@ -2234,23 +2192,22 @@ function ProjectDetailInner({ id }: { id: string }) {
                   </p>
                   <div className="portal-drawer-actions">
                     <button type="button" className="portal-btn-secondary" onClick={handleClosePreview}>Close</button>
-                    {previewDoc.title.includes('.md') && previewRevision?.content && (
-                      <button 
-                        type="button" 
-                        className="portal-btn-secondary" 
-                        onClick={() => {
-                          const blob = new Blob([previewRevision.content || ''], { type: 'text/markdown' });
-                          const url = URL.createObjectURL(blob);
-                          const a = document.createElement('a');
-                          a.href = url;
-                          a.download = `XSpark-Dev-Prompt-${project?.project_reference || 'Project'}.md`;
-                          document.body.appendChild(a);
-                          a.click();
-                          document.body.removeChild(a);
-                          URL.revokeObjectURL(url);
-                        }}
+                    {previewRevision && (
+                      <a
+                        href={`/api/documents/download?revisionId=${previewRevision.id}`}
+                        rel="noreferrer"
+                        target="_blank"
                       >
-                        ⬇️ Download .md File
+                        <button type="button" className="portal-btn-secondary">Download</button>
+                      </a>
+                    )}
+                    {canUpload && (
+                      <button
+                        type="button"
+                        className="portal-btn-secondary"
+                        onClick={() => { setShowUploadDoc(true); }}
+                      >
+                        <span>📎</span> Upload PDF
                       </button>
                     )}
                     {canDraft && (

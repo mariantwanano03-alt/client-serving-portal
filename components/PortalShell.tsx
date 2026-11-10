@@ -5,8 +5,6 @@ import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
 import { supabase } from '@/lib/supabase'
 import type { User } from '@supabase/supabase-js'
-import { ThemeProvider } from '@/components/ThemeProvider'
-
 export type UserProfile = {
   id: string
   full_name: string
@@ -210,7 +208,6 @@ export default function PortalShell({
         refreshProfile: loadProfile,
       }}
     >
-      <ThemeProvider>
         <main className="dashboard-shell">
           <aside className="dashboard-sidebar">
             <Link href="/dashboard" className="dashboard-brand">
@@ -308,7 +305,6 @@ export default function PortalShell({
           </footer>
         </section>
       </main>
-      </ThemeProvider>
     </PortalContext.Provider>
   )
 }
