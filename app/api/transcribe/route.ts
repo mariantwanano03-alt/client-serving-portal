@@ -16,12 +16,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing audioUrl or recordId' }, { status: 400 })
     }
     // 1. Extract file path from the URL (after bucket name)
-    const urlParts = audioUrl.split('/discovery-media/')
+    const urlParts = audioUrl.split('/meeting-transcripts/')
     const filePath = urlParts.length > 1 ? urlParts[1].split('?')[0] : null
     if (!filePath) throw new Error('Could not parse file path from URL')
     // 2. Download securely via admin client
     const { data: fileData, error: downloadError } = await supabaseAdmin.storage
-      .from('discovery-media')
+      .from('meeting-transcripts')
       .download(filePath)
     if (downloadError) throw new Error(`Storage download failed: ${downloadError.message}`)
     if (!fileData) throw new Error('No file data returned from storage')

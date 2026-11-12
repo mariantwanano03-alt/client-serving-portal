@@ -10,6 +10,8 @@ type Client = {
   client_code: string
   name: string
   email: string | null
+  phone: string | null
+  status: string
   created_at?: string
 }
 
@@ -38,18 +40,15 @@ function ClientsContent() {
   const canCreateClient =
     role === 'junior_developer' ||
     role === 'senior_dev_pm' ||
-    role === 'administrator' ||
     profile?.role === 'junior_developer' ||
     profile?.role === 'senior_dev_pm' ||
-    profile?.role === 'administrator' ||
-    (user?.email ? user.email.toLowerCase().includes('senior') : false) ||
-    (user?.email ? user.email.toLowerCase().includes('admin') : false)
+    (user?.email ? user.email.toLowerCase().includes('senior') : false)
 
   const loadClients = useCallback(async () => {
     setLoadingClients(true)
     const { data, error } = await supabase
       .from('clients')
-      .select('id, client_code, name, email, created_at')
+      .select('id, client_code, name, email, phone, status, created_at')
       .eq('status', 'active')
       .order('created_at', { ascending: false })
 
@@ -67,7 +66,7 @@ function ClientsContent() {
     async function fetchClients() {
       const { data, error } = await supabase
         .from('clients')
-        .select('id, client_code, name, email, created_at')
+        .select('id, client_code, name, email, phone, status, created_at')
         .eq('status', 'active')
         .order('created_at', { ascending: false })
 

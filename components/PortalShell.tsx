@@ -91,6 +91,15 @@ export default function PortalShell({
       }
 
       setProfile(data as UserProfile)
+
+      if (!data.is_active) {
+        setMessage('Your account has been removed or suspended. Please contact an administrator.')
+        await supabase.auth.signOut()
+        router.replace('/login')
+        setLoading(false)
+        return
+      }
+
       setLoading(false)
     } catch (err: unknown) {
       const errMessage = err instanceof Error ? err.message : 'Unknown error'
@@ -132,6 +141,12 @@ export default function PortalShell({
 
         setProfile(data as UserProfile)
         setLoading(false)
+
+        if (!data.is_active) {
+          setMessage('Your account has been removed or suspended. Please contact an administrator.')
+          await supabase.auth.signOut()
+          router.replace('/login')
+        }
       } catch (err: unknown) {
         if (!isMounted) return
         const errMessage = err instanceof Error ? err.message : 'Unknown error'
@@ -193,6 +208,7 @@ export default function PortalShell({
 
   const isClientsActive = pathname === '/clients' || pathname.startsWith('/clients/')
   const isProjectsActive = pathname === '/projects' || pathname.startsWith('/projects/')
+  const isDiscoveryActive = pathname === '/discovery' || pathname.startsWith('/discovery/')
   const isAdminActive = pathname === '/admin' || pathname.startsWith('/admin')
   const isDashboardActive = pathname === '/dashboard'
   const isHomeActive = pathname === '/'
@@ -239,12 +255,22 @@ export default function PortalShell({
               >
                 <span>▤</span> Projects
               </Link>
-              <Link
-                href="/admin"
-                className={`dashboard-nav-link ${isAdminActive ? 'selected' : ''}`}
-              >
-                <span>⚙</span> Admin
-              </Link>
+              {profile?.role !== 'administrator' && (
+                <Link
+                  href="/discovery"
+                  className={`dashboard-nav-link ${isDiscoveryActive ? 'selected' : ''}`}
+                >
+                  <span>🎙️</span> Discovery Meetings
+                </Link>
+              )}
+              {profile?.role === 'administrator' && (
+                <Link
+                  href="/admin"
+                  className={`dashboard-nav-link ${isAdminActive ? 'selected' : ''}`}
+                >
+                  <span>⚙</span> Admin
+                </Link>
+              )}
               <Link
                 href="/settings"
                 className={`dashboard-nav-link ${isSettingsActive ? 'selected' : ''}`}

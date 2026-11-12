@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useMemo, useCallback } from 'react'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import PortalShell, { usePortal } from '@/components/PortalShell'
 import { supabase } from '@/lib/supabase'
 import { approvalBadgeClass, formatApprovalStatus } from '@/lib/roles'
@@ -44,6 +45,7 @@ export default function ProjectsPage() {
 
 function ProjectsContent() {
   const { role, user, profile } = usePortal()
+  const router = useRouter()
 
   const [clients, setClients] = useState<Client[]>([])
   const [projects, setProjects] = useState<Project[]>([])
@@ -51,6 +53,12 @@ function ProjectsContent() {
   const [search, setSearch] = useState('')
   const [stageFilter, setStageFilter] = useState('all')
   const [showAddForm, setShowAddForm] = useState(false)
+
+  // Discovery Session Start Form
+  const [showStartSession, setShowStartSession] = useState(false)
+  const [discoveryTitle, setDiscoveryTitle] = useState('')
+  const [discoveryDate, setDiscoveryDate] = useState(() => new Date().toISOString().split('T')[0])
+  const [startingSession, setStartingSession] = useState(false)
 
   // Form State
   const [reference, setReference] = useState('')
@@ -64,8 +72,7 @@ function ProjectsContent() {
     role === 'senior_dev_pm' ||
     profile?.role === 'junior_developer' ||
     profile?.role === 'senior_dev_pm' ||
-    (user?.email ? user.email.toLowerCase().includes('senior') : false) ||
-    (user?.email ? user.email.toLowerCase().includes('admin') : false)
+    (user?.email ? user.email.toLowerCase().includes('senior') : false)
 
   const loadProjects = useCallback(async () => {
     setLoading(true)
@@ -179,6 +186,50 @@ function ProjectsContent() {
     setShowAddForm(false)
     setStatusMessage({ type: 'success', text: `Project "${cleanName}" created successfully.` })
     await loadProjects()
+  }
+
+  async function handleStartDiscoverySession() {
+    if (!discoveryTitle.trim()) {
+      setStatusMessage({ type: 'error', text: 'Meeting title is required.' })
+      return
+    }
+
+    setStartingSession(true)
+    setStatusMessage(null)
+
+    try {
+      const { data: sessionData } = await supabase.auth.getSession()
+      const token = sessionData.session?.access_token
+
+      const res = await fetch('/api/discovery/start', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          meetingTitle: discoveryTitle.trim(),
+          meetingDate: discoveryDate || undefined,
+        }),
+      })
+
+      const data = await res.json()
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to start discovery session')
+      }
+
+      setStatusMessage({ type: 'success', text: 'Discovery session started successfully.' })
+      setShowStartSession(false)
+      setStartingSession(false)
+      setDiscoveryTitle('')
+      setDiscoveryDate(new Date().toISOString().split('T')[0])
+      router.push(`/discovery/${data.data.id}`)
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error'
+      setStatusMessage({ type: 'error', text: msg })
+      setStartingSession(false)
+    }
   }
 
   const filteredProjects = useMemo(() => {
@@ -321,6 +372,74 @@ function ProjectsContent() {
         </div>
       )}
 
+      {/* Start Discovery Session Form */}
+      {showStartSession && canCreateProject && (
+        <div className="portal-card" style={{ marginBottom: 24 }}>
+          <div className="portal-card-header">
+            <h3>Start Discovery Session</h3>
+            <button
+              type="button"
+              className="portal-back-btn"
+              onClick={() => setShowStartSession(false)}
+            >
+              ✕ Cancel
+            </button>
+          </div>
+
+          <form onSubmit={(e) => { e.preventDefault(); handleStartDiscoverySession() }} style={{ display: 'grid', gap: 16 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16 }}>
+              <div className="form-group">
+                <label className="form-label" htmlFor="discovery-title">
+                  Meeting / Client Title <span style={{ color: '#ef4444' }}>*</span>
+                </label>
+                <input
+                  id="discovery-title"
+                  className="form-input"
+                  placeholder="e.g. Acme Corp Discovery"
+                  value={discoveryTitle}
+                  onChange={(e) => setDiscoveryTitle(e.target.value)}
+                  disabled={startingSession}
+                  required
+                />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label" htmlFor="discovery-date">
+                  Meeting Date <span style={{ color: '#ef4444' }}>*</span>
+                </label>
+                <input
+                  id="discovery-date"
+                  type="date"
+                  className="form-input"
+                  value={discoveryDate}
+                  onChange={(e) => setDiscoveryDate(e.target.value)}
+                  disabled={startingSession}
+                  required
+                />
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 8 }}>
+              <button
+                type="button"
+                className="portal-btn-secondary"
+                onClick={() => setShowStartSession(false)}
+                disabled={startingSession}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="portal-btn-primary"
+                disabled={startingSession}
+              >
+                {startingSession ? 'Starting...' : 'Start Discovery Session'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {/* Toolbar / Filters */}
       <div className="portal-toolbar">
         <div style={{ display: 'flex', gap: 12, flex: 1, flexWrap: 'wrap' }}>
@@ -350,12 +469,22 @@ function ProjectsContent() {
         </div>
 
         {canCreateProject && (
-          <Link
-            href="/projects/new"
-            className="portal-btn-primary"
-          >
-            <span>+</span> Add Project
-          </Link>
+          <>
+            <Link
+              href="/projects/new"
+              className="portal-btn-primary"
+            >
+              <span>+</span> Add Project
+            </Link>
+            <button
+              type="button"
+              onClick={() => setShowStartSession(true)}
+              className="portal-btn-secondary"
+              disabled={startingSession}
+            >
+              {startingSession ? 'Starting...' : 'Start Discovery Session'}
+            </button>
+          </>
         )}
       </div>
 

@@ -61,7 +61,7 @@ function LoginPageContent() {
       if (userId) {
         const { data: profile } = await supabase
           .from('profiles')
-          .select('is_active')
+          .select('role, is_active')
           .eq('id', userId)
           .maybeSingle()
         if (profile && profile.is_active === false) {
@@ -69,18 +69,27 @@ function LoginPageContent() {
           setErrorMessage('This account is suspended. Please contact an administrator.')
           return
         }
+
+        // Role-based redirect
+        const role = profile?.role
+        const nextParam = new URLSearchParams(window.location.search).get('next')
+        const destination =
+          nextParam &&
+          nextParam.startsWith('/') &&
+          !nextParam.startsWith('//') &&
+          !nextParam.startsWith('/login')
+            ? nextParam
+            : role === 'administrator'
+            ? '/admin'
+            : role === 'senior_dev_pm'
+            ? '/senior'
+            : '/junior'
+
+        router.push(destination)
+        return
       }
 
-      const nextParam = new URLSearchParams(window.location.search).get('next')
-      const destination =
-        nextParam &&
-        nextParam.startsWith('/') &&
-        !nextParam.startsWith('//') &&
-        !nextParam.startsWith('/login')
-          ? nextParam
-          : '/dashboard'
-
-      router.push(destination)
+      router.push('/dashboard')
     } catch (err: unknown) {
       const msg =
         err instanceof Error ? err.message : 'An unexpected error occurred during sign-in.'

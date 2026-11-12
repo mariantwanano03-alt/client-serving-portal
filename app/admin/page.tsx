@@ -166,6 +166,7 @@ function AdminContent() {
   const [auditFilter, setAuditFilter] = useState('all')
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [creatingUser, setCreatingUser] = useState(false)
   const [previewDocId, setPreviewDocId] = useState<string | null>(null)
   const [leadSelection, setLeadSelection] = useState<Record<string, string>>({})
   const [developerSelection, setDeveloperSelection] = useState<Record<string, string>>({})
@@ -281,11 +282,11 @@ function AdminContent() {
   const previewRevision = previewDoc ? getCurrentRevision(previewDoc) : undefined
 
   const filteredUsers = useMemo(() => {
-    if (!searchUser.trim()) return profiles.filter((p) => !p.deleted_at)
+    if (!searchUser.trim()) return profiles.filter((p) => p.is_active)
     const q = searchUser.toLowerCase()
     return profiles.filter(
       (profile) =>
-        !profile.deleted_at &&
+        profile.is_active &&
         (profile.full_name.toLowerCase().includes(q) || profile.role.toLowerCase().includes(q))
     )
   }, [profiles, searchUser])
@@ -302,21 +303,20 @@ function AdminContent() {
     // Client-side validation
     if (!newUserForm.full_name || !newUserForm.email || !newUserForm.password || !newUserForm.role) {
       setStatusMessage({ type: 'error', text: 'All fields are required.' })
-      setSubmitting(false)
       return
     }
     if (newUserForm.password.length < 6) {
       setStatusMessage({ type: 'error', text: 'Password must be at least 6 characters.' })
-      setSubmitting(false)
       return
     }
 
-    setSubmitting(true)
+    setCreatingUser(true)
+    setStatusMessage(null)
     try {
       const { data: sessionData } = await supabase.auth.getSession()
       const accessToken = sessionData.session?.access_token ?? ''
       if (!accessToken) {
-        setSubmitting(false)
+        setCreatingUser(false)
         setStatusMessage({ type: 'error', text: 'No active session. Please sign in again.' })
         return
       }
@@ -335,7 +335,7 @@ function AdminContent() {
     } catch (err: unknown) {
       setStatusMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to create user.' })
     } finally {
-      setSubmitting(false)
+      setCreatingUser(false)
     }
   }
 
@@ -377,13 +377,21 @@ function AdminContent() {
   }
 
   async function handleRemoveUser(userId: string, userName: string) {
-    if (!isAdmin) return
+    if (!isAdmin) {
+      setStatusMessage({ type: 'error', text: 'Only administrators can remove users.' })
+      return
+    }
     if (!window.confirm(`Remove user "${userName}"? This cannot be undone.`)) return
 
     setSubmitting(true)
     try {
-      const { data: sessionData } = await supabase.auth.getSession()
-      const accessToken = sessionData?.session?.access_token ?? ''
+      const { data: sessionData, error: sessionError } = await supabase.auth.getSession()
+      if (sessionError || !sessionData?.session?.access_token) {
+        setSubmitting(false)
+        setStatusMessage({ type: 'error', text: 'No active session. Please sign in again.' })
+        return
+      }
+      const accessToken = sessionData.session.access_token
       const response = await fetch('/api/admin/delete-user', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
@@ -394,7 +402,9 @@ function AdminContent() {
       setStatusMessage({ type: 'success', text: `User "${userName}" removed.` })
       await loadAdminData(false)
     } catch (err: unknown) {
-      setStatusMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to remove user.' })
+      const message = err instanceof Error ? err.message : 'Failed to remove user.'
+      console.error('Remove user failed:', message)
+      setStatusMessage({ type: 'error', text: message })
     } finally {
       setSubmitting(false)
     }
@@ -567,7 +577,7 @@ function AdminContent() {
               <div className="portal-card" key={project.id}>
                 <div className="portal-card-header">
                   <div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}><span className="code-badge">{project.project_reference}</span><span className={getStageBadgeClass(project.stage)}>{project.stage.replace(/_/g, ' ')}</span></div>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}><span className="code-badge">{project.project_reference || 'No Ref'}</span><span className={getStageBadgeClass(project.stage)}>{project.stage.replace(/_/g, ' ')}</span></div>
                     <h3 style={{ marginTop: 8 }}>{project.name}</h3>
                     <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>{project.clients?.name ?? 'No client'}</p>
                   </div>
@@ -669,7 +679,7 @@ function AdminContent() {
                       : null
                     return (
                       <tr key={project.id}>
-                        <td><span className="code-badge">{project.project_reference}</span></td>
+                        <td><span className="code-badge">{project.project_reference || 'No Ref'}</span></td>
                         <td>
                           <Link href={`/projects/${project.id}`} className="portal-table-link" style={{ fontWeight: 600 }}>
                             {project.name}
@@ -693,31 +703,6 @@ function AdminContent() {
                         </td>
                         <td style={{ textAlign: 'right' }}>
                           <div style={{ display: 'inline-flex', gap: 8 }}>
-                            {project.stage === 'discovery' && (
-                              <button
-                                type="button"
-                                className="portal-btn-primary"
-                                style={{ height: 28, fontSize: 11, padding: '0 10px' }}
-                                disabled={submitting}
-                                onClick={async () => {
-                                  if (!window.confirm(`Approve "${project.name}" and advance to Scoping?`)) return
-                                  setSubmitting(true)
-                                  const { error } = await supabase
-                                    .from('projects')
-                                    .update({ stage: 'scoping' })
-                                    .eq('id', project.id)
-                                  setSubmitting(false)
-                                  if (error) {
-                                    setStatusMessage({ type: 'error', text: 'Could not approve project: ' + error.message })
-                                  } else {
-                                    setStatusMessage({ type: 'success', text: `✓ Project "${project.name}" approved and moved to Scoping.` })
-                                    await loadAdminData(false)
-                                  }
-                                }}
-                              >
-                                ✓ Approve
-                              </button>
-                            )}
                             <Link
                               href={`/projects/${project.id}`}
                               className="portal-btn-secondary"
@@ -749,9 +734,6 @@ function AdminContent() {
                 <span className="portal-search-icon">🔍</span>
                 <input className="portal-search-input" placeholder="Search team member..." value={searchUser} onChange={(event) => setSearchUser(event.target.value)} />
               </div>
-              <button type="button" className="portal-btn-primary" style={{ height: 38, whiteSpace: 'nowrap' }} onClick={() => setIsAddUserModalOpen(true)}>
-                + Add User
-              </button>
             </div>
           </div>
 
@@ -801,17 +783,12 @@ function AdminContent() {
                       </td>
                       <td style={{ textAlign: 'right' }}>
                         <div style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
-                          <select className="form-input" style={{ width: 'auto', height: 32, fontSize: 12 }} value={profile.role} onChange={(event) => handleUpdateRole(profile.id, event.target.value as Profile['role'], profile.role)} disabled={submitting}>
+                          <select className="form-input" style={{ width: 'auto', height: 32, fontSize: 12 }} value={profile.role} disabled>
                             <option value="junior_developer">Junior Developer</option>
                             <option value="senior_dev_pm">Senior Dev / PM</option>
                             <option value="administrator">Administrator</option>
                           </select>
-                          <button type="button" className="portal-btn-secondary" style={{ height: 32, padding: '0 8px', fontSize: 11 }} onClick={() => handleToggleUserStatus(profile.id, profile.is_active)} disabled={submitting}>
-                            {profile.is_active ? 'Suspend' : 'Activate'}
-                          </button>
-                          <button type="button" className="portal-btn-secondary" style={{ height: 32, padding: '0 8px', fontSize: 11, color: '#dc2626', borderColor: '#dc2626' }} onClick={() => handleRemoveUser(profile.id, profile.full_name)} disabled={submitting}>
-                            Remove
-                          </button>
+                                                    
                         </div>
                       </td>
                     </tr>
@@ -980,7 +957,7 @@ function AdminContent() {
               </div>
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 12 }}>
                 <button type="button" className="portal-btn-secondary" onClick={() => setIsAddUserModalOpen(false)}>Cancel</button>
-                <button type="submit" className="portal-btn-primary" disabled={submitting}>{submitting ? 'Creating...' : 'Create User'}</button>
+                <button type="submit" className="portal-btn-primary" disabled={creatingUser}>{creatingUser ? 'Creating...' : 'Create User'}</button>
               </div>
             </form>
           </div>

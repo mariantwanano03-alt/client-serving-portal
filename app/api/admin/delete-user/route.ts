@@ -3,11 +3,11 @@ import { supabaseAdmin } from '@/lib/supabase-server';
 
 export async function POST(req: Request) {
   try {
+    // Verify the caller is an active administrator (same pattern as create-user)
     const { data: callerData, error: callerError } = await supabaseAdmin.auth.getUser(
       req.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
     );
     if (callerError || !callerData?.user) {
-      console.error('delete-user: caller auth failed', callerError);
       return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
     }
     const callerUser = callerData.user;
@@ -31,16 +31,38 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'cannot_delete_self' }, { status: 400 });
     }
 
-    // Deactivate and soft-delete the profile to avoid
-    // foreign key violations from tables referencing profiles.id
-    const { error } = await supabaseAdmin
+    const { data: target } = await supabaseAdmin
       .from('profiles')
-      .update({ is_active: false, deleted_at: new Date().toISOString() })
+      .select('id, is_active, full_name, role')
+      .eq('id', user_id)
+      .single();
+
+    if (!target) {
+      return NextResponse.json({ error: 'User not found.' }, { status: 404 });
+    }
+
+    // Deactivate the profile row so the user no longer appears in the
+    // team directory and PortalShell blocks them from accessing.
+    const { error: profileError } = await supabaseAdmin
+      .from('profiles')
+      .update({ is_active: false })
       .eq('id', user_id);
 
-    if (error) {
-      console.error('delete-user: deactivate failed', error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    if (profileError) {
+      return NextResponse.json({ error: profileError.message }, { status: 500 });
+    }
+
+    // Try to delete the Supabase Auth account so the email can be re-used.
+    // If deletion fails (local Supabase limitation), rename the auth account's
+    // email to free up the original email for re-use.
+    const { error: authDeleteError } = await supabaseAdmin.auth.admin.deleteUser(user_id);
+    if (authDeleteError) {
+      console.warn('delete-user: auth delete failed, renaming email instead', authDeleteError.message);
+      await supabaseAdmin.auth.admin.updateUserById(user_id, {
+        email: `deleted-${user_id}@example.com`,
+      }).catch((renameErr) => {
+        console.warn('delete-user: email rename also failed', renameErr.message);
+      });
     }
 
     // Log the action
@@ -49,8 +71,8 @@ export async function POST(req: Request) {
       action: 'user.deleted',
       entity_type: 'profile',
       entity_id: user_id,
-      before_value: { is_active: true },
-      after_value: { is_active: false },
+      before_value: { is_active: target.is_active, full_name: target.full_name, role: target.role },
+      after_value: { is_active: false, removed: true },
     });
 
     return NextResponse.json({ success: true });

@@ -6,6 +6,15 @@ function respond(status: number, body: Record<string, unknown>) {
   return NextResponse.json(body, { status });
 }
 
+// WinAnsi (used by pdf-lib StandardFonts) cannot encode many Unicode
+// characters (curly quotes, en/em dashes, non-breaking hyphens, narrow
+// no-break spaces, mathematical symbols, etc.). Replace any non-ASCII
+// character with a fallback so PDF generation never throws on
+// client-supplied document content.
+function normalizePdfText(text: string): string {
+  return text.replace(/[^\x00-\x7F]/g, '?');
+}
+
 export async function GET(req: Request) {
   try {
     const caller = await getCallerProfile(req.headers.get('authorization'));
@@ -71,7 +80,7 @@ export async function GET(req: Request) {
     }
 
     // Case 2: AI-generated or manual — build a PDF from content
-    const content = revision.content || '';
+    const content = normalizePdfText(revision.content || '');
     const pdfDoc = await PDFDocument.create();
     const page = pdfDoc.addPage([612, 792]);
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);

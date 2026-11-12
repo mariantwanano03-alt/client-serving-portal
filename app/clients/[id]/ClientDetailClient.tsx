@@ -99,6 +99,13 @@ function ClientDetailContent({ params }: { params: Promise<{ id: string }> }) {
   const [contactCountry, setContactCountry] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
+  // Edit contact form state
+  const [editingContactId, setEditingContactId] = useState<string | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editRole, setEditRole] = useState('')
+  const [editEmail, setEditEmail] = useState('')
+  const [editPhone, setEditPhone] = useState('')
+
   // Client edit form state
   const [showEditClient, setShowEditClient] = useState(false)
   const [editClientCode, setEditClientCode] = useState('')
@@ -252,6 +259,60 @@ function ClientDetailContent({ params }: { params: Promise<{ id: string }> }) {
       entity_id: clientId as string,
       before_value: { contact_id: contactId, contact_name: contactName },
     })
+    await loadClientData()
+  }
+
+  async function handleEditContact(contactId: string) {
+    if (!contactId) return
+    setEditingContactId(contactId)
+    const contact = contacts.find((c) => c.id === contactId)
+    if (!contact) return
+    setEditName(contact.name)
+    setEditRole(contact.role || '')
+    setEditEmail(contact.email || '')
+    setEditPhone(contact.phone || '')
+  }
+
+  async function handleSaveContactEdit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!editingContactId) return
+
+    const { error } = await supabase
+      .from('client_contacts')
+      .update({
+        name: editName.trim(),
+        role: editRole.trim() || null,
+        email: editEmail.trim() || null,
+        phone: editPhone.trim() || null,
+      })
+      .eq('id', editingContactId)
+
+    if (error) {
+      setStatusMessage({ type: 'error', text: 'Failed to update contact: ' + error.message })
+      return
+    }
+
+    // Audit the change
+    await supabase.from('audit_entries').insert({
+      actor_user_id: user?.id ?? null,
+      action: 'client.contact_updated',
+      entity_type: 'client',
+      entity_id: clientId as string,
+      after_value: {
+        contact_id: editingContactId,
+        name: editName.trim(),
+        role: editRole.trim() || null,
+        email: editEmail.trim() || null,
+        phone: editPhone.trim() || null,
+      },
+    })
+
+    setStatusMessage({ type: 'success', text: 'Contact updated successfully.' })
+    setEditingContactId(null)
+    setEditName('')
+    setEditRole('')
+    setEditEmail('')
+    setEditPhone('')
     await loadClientData()
   }
 
@@ -746,9 +807,14 @@ function ClientDetailContent({ params }: { params: Promise<{ id: string }> }) {
                   <td><span style={{ color: '#2563eb' }}>{contact.email || '—'}</span></td>
                   <td>{contact.phone || '—'}</td>
                   <td style={{ textAlign: 'right' }}>
-                    <button type="button" className="portal-btn-secondary" style={{ height: 28, fontSize: 11, color: '#ef4444' }} onClick={() => handleRemoveContact(contact.id)}>
-                      Remove
-                    </button>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button type="button" className="portal-btn-secondary" style={{ height: 28, fontSize: 11, color: '#ef4444' }} onClick={() => handleRemoveContact(contact.id)}>
+                        Remove
+                      </button>
+                      <button type="button" className="portal-btn-secondary" style={{ height: 28, fontSize: 11 }} onClick={() => handleEditContact(contact.id)}>
+                        Edit
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}

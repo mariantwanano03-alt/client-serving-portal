@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import PortalShell, { usePortal } from '@/components/PortalShell'
 import { supabase } from '@/lib/supabase'
 
@@ -42,6 +43,7 @@ export default function DiscoveryClient({ id }: { id: string }) {
 
 function DiscoveryInner({ id }: { id: string }) {
   const { role } = usePortal()
+  const router = useRouter()
   const canApprove = role === 'senior_dev_pm' || role === 'administrator'
 
   const [session, setSession] = useState<DiscoverySession | null>(null)
@@ -205,7 +207,17 @@ function DiscoveryInner({ id }: { id: string }) {
         throw new Error(data.error || 'Approval processing failed')
       }
 
-      await loadSession()
+      setStatusMessage({
+        type: 'success',
+        text: 'Client and Project created! Redirecting...',
+      })
+      if (data.projectId) {
+        setTimeout(() => {
+          router.push(`/projects/${data.projectId}`)
+        }, 1500)
+      } else {
+        await loadSession()
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Unknown error'
       setStatusMessage({ type: 'error', text: msg })
@@ -265,12 +277,12 @@ function DiscoveryInner({ id }: { id: string }) {
       const blob = new Blob(chunksRef.current, { type: 'audio/webm' })
       const filePath = `discoveries/${session.id}/${Date.now()}.webm`
       const { error: uploadError } = await supabase.storage
-        .from('discovery-media')
+        .from('meeting-transcripts')
         .upload(filePath, blob, { contentType: 'audio/webm', upsert: false })
       if (uploadError) throw new Error('Upload failed: ' + uploadError.message)
       // Get a signed URL (bucket is private)
       const { data: signedData, error: signedErr } = await supabase.storage
-        .from('discovery-media')
+        .from('meeting-transcripts')
         .createSignedUrl(filePath, 300) // 5 min TTL
       if (signedErr || !signedData?.signedUrl) throw new Error('Could not get signed URL')
       const { data: authData } = await supabase.auth.getSession()

@@ -1451,7 +1451,7 @@ function ProjectDetailInner({ id }: { id: string }) {
     }
   }
 
-  async function handleGenerateDocument(documentType: 'prd' | 'requirements' | 'quotation') {
+  async function handleGenerateDocument(documentType: 'prd' | 'requirements' | 'quotation' | 'sla') {
     if (!canDraft) {
       setStatusMessage({ type: 'error', text: 'You do not have permission to generate documents.' })
       return
@@ -1473,7 +1473,7 @@ function ProjectDetailInner({ id }: { id: string }) {
         throw new Error(data.error || 'Failed to generate document')
       }
 
-      const typeLabels = { prd: 'PRD', requirements: 'SRS', quotation: 'Quotation' }
+      const typeLabels = { prd: 'PRD', requirements: 'SRS', quotation: 'Quotation', sla: 'Service Agreement' }
       setStatusMessage({ type: 'success', text: `${typeLabels[documentType]} generated as Revision #1. Pending review.` })
       await refreshAllProjectData()
     } catch (err: unknown) {
@@ -1794,7 +1794,15 @@ function ProjectDetailInner({ id }: { id: string }) {
                       >
                         <span>✨</span> AI Generate Quotation
                       </button>
-                    </div>
+                        <button
+                        type="button"
+                        className="portal-btn-secondary"
+                        style={{ height: 34, fontSize: 12, background: '#faf5ff', color: '#6b21a8', border: '1px solid #d8b4fe' }}
+                        onClick={() => handleGenerateDocument('sla')}
+                        disabled={submitting}
+                      >
+                        <span>✨</span> AI Generate SLA
+                      </button>                    </div>
                   )}
                 </div>
 
