@@ -1,6 +1,7 @@
 -- Create RPC functions for project assignment management
 -- These functions are called by the Admin console to manage project staffing
-
+DROP FUNCTION IF EXISTS assign_project_lead(uuid, uuid);
+DROP FUNCTION IF EXISTS assign_project_developer(uuid, uuid);
 -- assign_project_lead: Assign or transfer project lead with approval authority
 CREATE OR REPLACE FUNCTION assign_project_lead(p_project_id uuid, p_user_id uuid)
 RETURNS void AS $$
