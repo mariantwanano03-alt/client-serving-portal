@@ -1,0 +1,1 @@
+delete from projects where project_reference = '' or name = '';
