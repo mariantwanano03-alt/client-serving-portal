@@ -190,12 +190,10 @@ export default function PortalShell({
     .slice(0, 2)
     .toUpperCase()
 
-  const isClientsActive = pathname === '/clients' || pathname.startsWith('/clients/')
-  const isDiscoveryActive = pathname === '/discovery-meetings' || pathname.startsWith('/discovery-meetings/')
-  const isProjectsActive = pathname === '/projects' || pathname.startsWith('/projects/')
-  const isAdminActive = pathname === '/admin' || pathname.startsWith('/admin')
-  const isDashboardActive = pathname === '/dashboard'
   const isHomeActive = pathname === '/'
+  const isProjectsActive = pathname === '/projects' || pathname.startsWith('/projects/')
+  const isSettingsActive = pathname === '/settings' || pathname.startsWith('/settings/')
+  const isAdminActive = pathname === '/admin' || pathname.startsWith('/admin')
 
   return (
     <PortalContext.Provider
@@ -221,22 +219,10 @@ export default function PortalShell({
 
           <nav className="dashboard-nav">
             <Link
-              href="/dashboard"
-              className={`dashboard-nav-link ${isDashboardActive ? 'selected' : ''}`}
+              href="/"
+              className={`dashboard-nav-link ${isHomeActive ? 'selected' : ''}`}
             >
-              <span>◫</span> Overview
-            </Link>
-            <Link
-              href="/clients"
-              className={`dashboard-nav-link ${isClientsActive ? 'selected' : ''}`}
-            >
-              <span>♙</span> Clients
-            </Link>
-            <Link
-              href="/discovery-meetings"
-              className={`dashboard-nav-link ${isDiscoveryActive ? 'selected' : ''}`}
-            >
-              <span>🔍</span> Discovery Meetings
+              <span>⌂</span> Home
             </Link>
             <Link
               href="/projects"
@@ -245,27 +231,22 @@ export default function PortalShell({
               <span>▤</span> Projects
             </Link>
             <Link
-              href="/admin"
-              className={`dashboard-nav-link ${isAdminActive ? 'selected' : ''}`}
+              href="/settings"
+              className={`dashboard-nav-link ${isSettingsActive ? 'selected' : ''}`}
             >
-              <span>⚙</span> Admin
+              <span>⚙</span> Settings
             </Link>
-            <Link
-              href="/"
-              className={`dashboard-nav-link ${isHomeActive ? 'selected' : ''}`}
-            >
-              <span>⌂</span> Home
-            </Link>
+            {profile.role === 'administrator' && (
+              <Link
+                href="/admin"
+                className={`dashboard-nav-link ${isAdminActive ? 'selected' : ''}`}
+              >
+                <span>🛡</span> Admin
+              </Link>
+            )}
           </nav>
 
           <div className="dashboard-sidebar-bottom">
-            <div className="dashboard-help">
-              <span className="help-symbol">✳</span>
-              <strong>Need a hand?</strong>
-              <p>Keep your client accounts and deliverables organized.</p>
-              <Link href="/clients">Explore clients →</Link>
-            </div>
-
             <button
               className="dashboard-signout"
               onClick={handleSignOut}

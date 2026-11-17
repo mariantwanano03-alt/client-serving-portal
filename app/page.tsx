@@ -1,136 +1,222 @@
+'use client'
 
-import Link from 'next/link'
+import React, { useState, useCallback } from 'react'
+import { useRouter } from 'next/navigation'
+import PortalShell, { usePortal } from '@/components/PortalShell'
 import { supabase } from '@/lib/supabase'
 
-export default async function Home() {
-  const { error } = await supabase.auth.getSession()
+export default function Home() {
+  const router = useRouter()
+  const { profile } = usePortal()
+  const userName = profile?.full_name?.trim() || 'User'
+
+  const [showForm, setShowForm] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+
+  const [title, setTitle] = useState('')
+  const [notes, setNotes] = useState('')
+  const [audioFile, setAudioFile] = useState<File | null>(null)
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!title.trim()) {
+      setMessage({ type: 'error', text: 'Project title is required.' })
+      return
+    }
+
+    setLoading(true)
+    setMessage(null)
+
+    try {
+      // Optional audio upload (best-effort, non-fatal)
+      let audioStorageRef: string | null = null
+      if (audioFile) {
+        try {
+          const fileName = `meeting-${Date.now()}.${audioFile.name.split('.').pop() || 'webm'}`
+          const filePath = `home-uploads/${fileName}`
+          const { error: uploadError } = await supabase.storage
+            .from('meeting-transcripts')
+            .upload(filePath, audioFile, {
+              contentType: audioFile.type || 'audio/webm',
+              cacheControl: '3600',
+            })
+          if (!uploadError) {
+            const { data: { publicUrl } } = supabase.storage
+              .from('meeting-transcripts')
+              .getPublicUrl(filePath)
+            audioStorageRef = publicUrl
+          }
+        } catch {
+          // Non-fatal: continue without audio ref
+        }
+      }
+
+      // Step 1: Create discovery session
+      const meetingDate = new Date().toISOString().split('T')[0]
+      const startRes = await fetch('/api/discovery/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          meeting_date: meetingDate,
+          client_name: title.trim(),
+          primary_contact: userName,
+          additional_notes: notes.trim() || null,
+          audio_storage_ref: audioStorageRef || null,
+        }),
+      })
+
+      const startResult = await startRes.json()
+      if (!startRes.ok || !startResult?.data?.id) {
+        setMessage({ type: 'error', text: startResult?.error || 'Failed to create discovery session.' })
+        setLoading(false)
+        return
+      }
+
+      const sessionId = startResult.data.id
+
+      // Step 2: Immediately approve → creates client + project + documents
+      const approveRes = await fetch('/api/discovery/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: sessionId }),
+      })
+
+      const approveResult = await approveRes.json()
+      if (!approveRes.ok || !approveResult?.project?.id) {
+        setMessage({ type: 'error', text: approveResult?.error || 'Failed to create project.' })
+        setLoading(false)
+        return
+      }
+
+      setMessage({ type: 'success', text: 'Project created!' })
+      setLoading(false)
+
+      // Redirect to the new project workspace
+      router.push(`/projects/${approveResult.project.id}`)
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'An unexpected error occurred.'
+      setMessage({ type: 'error', text: msg })
+      setLoading(false)
+    }
+  }
 
   return (
-    <main className="portal">
-      <aside className="sidebar">
-        <Link href="/" className="brand">
-          <span className="brand-icon">C</span>
-          <span>
-            <strong>ClientFlow</strong>
-            <small>Serving Portal</small>
-          </span>
-        </Link>
-
-        <p className="nav-heading">WORKSPACE</p>
-
-        <nav className="side-nav">
-          <Link href="/" className="nav-link active">
-            <span>◫</span> Overview
-          </Link>
-          <Link href="/dashboard" className="nav-link">
-            <span>▦</span> Dashboard
-          </Link>
-          <Link href="/clients" className="nav-link">
-            <span>♙</span> Clients
-          </Link>
-          <Link href="/projects" className="nav-link">
-            <span>▤</span> Projects
-          </Link>
-          <Link href="/login" className="nav-link">
-            <span>↗</span> Sign in
-          </Link>
-        </nav>
-
-        <div className="sidebar-bottom">
-          <div className="help-card">
-            <strong>Need assistance?</strong>
-            <p>We&apos;re here to help you keep things moving.</p>
-            <Link href="/login">Get started →</Link>
-          </div>
-          <p className="sidebar-footer">ClientFlow · Workspace</p>
-        </div>
-      </aside>
-
-      <section className="main-content">
-        <header className="topbar">
-          <div>
-            <p className="eyebrow">WORKSPACE / OVERVIEW</p>
-            <h2>Client Serving Portal</h2>
-          </div>
-          <Link href="/login" className="profile-link">
-            <span className="avatar">N</span>
-            <span className="profile-label">Your account</span>
-          </Link>
-        </header>
-
-        <section className="welcome">
-          <div>
-            <span className="welcome-tag">YOUR WORKSPACE</span>
-            <h1>Everything in one place.</h1>
-            <p>
-              Manage client relationships, track projects and keep
-              your work moving forward.
+    <PortalShell title="Home" breadcrumb="WORKSPACE / HOME">
+      <div style={{ maxWidth: 560, margin: '0 auto', padding: 40, textAlign: 'center' }}>
+        {!showForm ? (
+          <>
+            <h1 style={{ fontSize: 32, fontWeight: 800, color: '#14213d', margin: '0 0 16px' }}>
+              Client Serving Portal
+            </h1>
+            <p style={{ fontSize: 15, color: '#64748b', margin: '0 0 32px' }}>
+              Create your first project from a discovery meeting. The client record and project
+              workspace are generated immediately — no approval step required.
             </p>
-            <Link href="/projects" className="primary-button">
-              Explore projects <span>→</span>
-            </Link>
-          </div>
-          <div className="welcome-art" aria-hidden="true">
-            <div className="art-circle circle-one" />
-            <div className="art-circle circle-two" />
-            <div className="art-document">
-              <span className="document-icon">✳</span>
-              <div className="document-line long-line" />
-              <div className="document-line" />
-              <div className="document-line short-line" />
-              <div className="document-check">✓</div>
-            </div>
-            <div className="floating-badge">✓ Organised</div>
-          </div>
-        </section>
+            <button
+              type="button"
+              onClick={() => setShowForm(true)}
+              className="portal-btn-primary"
+              style={{ height: 52, padding: '0 32px', fontSize: 16, fontWeight: 700 }}
+              disabled={loading}
+            >
+              {loading ? 'Creating project...' : '+ Add New Project'}
+            </button>
+            {message && (
+              <div
+                style={{ marginTop: 16, padding: 12, borderRadius: 8, background: message.type === 'success' ? '#ecfdf5' : '#fef2f2', color: message.type === 'success' ? '#065f46' : '#b91c1c', fontSize: 13 }}
+              >
+                {message.text}
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={() => setShowForm(false)}
+              className="portal-back-btn"
+              style={{ marginBottom: 16, display: 'inline-flex', alignItems: 'center', gap: 6 }}
+            >
+              <span>←</span> Back
+            </button>
+            <h2 style={{ fontSize: 22, fontWeight: 700, color: '#14213d', margin: '0 0 8px' }}>New Project</h2>
+            <p style={{ color: '#64748b', margin: '0 0 24px', fontSize: 13 }}>
+              Enter the project title and any notes from your discovery conversation.
+            </p>
+            <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14, textAlign: 'left' }}>
+              <div className="form-group">
+                <label className="form-label">Project Title <span style={{ color: '#ef4444' }}>*</span></label>
+                <input
+                  className="form-input"
+                  placeholder="e.g. Acme Customer Portal"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  disabled={loading}
+                  required
+                  autoFocus
+                />
+              </div>
 
-        <div className={`connection-status ${error ? 'connection-error' : ''}`}>
-          <span className="status-dot" />
-          <span>
-            {error
-              ? 'Supabase connection failed: ' + error.message
-              : 'Supabase connection successful'}
-          </span>
-        </div>
+              <div className="form-group">
+                <label className="form-label">Transcript / Notes</label>
+                <textarea
+                  className="form-input"
+                  style={{ minHeight: 120 }}
+                  placeholder="Key points from the discovery conversation..."
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  disabled={loading}
+                />
+              </div>
 
-        <section className="section-heading">
-          <div>
-            <h2>Your workspace</h2>
-            <p>Quick access to the tools you need.</p>
-          </div>
-        </section>
+              <div className="form-group">
+                <label className="form-label">Audio Upload <span style={{ color: '#94a3b8' }}>(Optional)</span></label>
+                <input
+                  type="file"
+                  className="form-input"
+                  accept="audio/*"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0] || null
+                    setAudioFile(file)
+                  }}
+                  disabled={loading}
+                />
+                {audioFile && (
+                  <p style={{ marginTop: 6, fontSize: 11, color: '#64748b' }}>
+                    {audioFile.name} ({Math.round(audioFile.size / 1024)} KB) — will be uploaded with the session.
+                  </p>
+                )}
+              </div>
 
-        <section className="feature-grid">
-          <Link href="/clients" className="feature-card">
-            <div className="feature-icon clients-icon">♙</div>
-            <span className="card-arrow">↗</span>
-            <h3>Clients</h3>
-            <p>View and manage your client relationships.</p>
-            <span className="card-link">Open clients →</span>
-          </Link>
-
-          <Link href="/projects" className="feature-card">
-            <div className="feature-icon projects-icon">▤</div>
-            <span className="card-arrow">↗</span>
-            <h3>Projects</h3>
-            <p>Keep track of projects and their progress.</p>
-            <span className="card-link">View projects →</span>
-          </Link>
-
-          <Link href="/dashboard" className="feature-card">
-            <div className="feature-icon dashboard-icon">◫</div>
-            <span className="card-arrow">↗</span>
-            <h3>Dashboard</h3>
-            <p>Access your workspace overview.</p>
-            <span className="card-link">Open dashboard →</span>
-          </Link>
-        </section>
-
-        <footer className="page-footer">
-          <span>ClientFlow</span>
-          <span>Client Serving Portal · All in one workspace</span>
-        </footer>
-      </section>
-    </main>
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => setShowForm(false)}
+                  className="portal-btn-secondary"
+                  disabled={loading}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="portal-btn-primary"
+                  disabled={loading}
+                >
+                  {loading ? 'Creating project...' : 'Create Project'}
+                </button>
+              </div>
+            </form>
+            {message && (
+              <div
+                style={{ marginTop: 16, padding: 12, borderRadius: 8, background: message.type === 'success' ? '#ecfdf5' : '#fef2f2', color: message.type === 'success' ? '#065f46' : '#b91c1c', fontSize: 13 }}
+              >
+                {message.text}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </PortalShell>
   )
 }
