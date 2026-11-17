@@ -65,7 +65,7 @@ export default function ProjectsPage() {
 
   return (
     <PortalShell title="Projects" breadcrumb="WORKSPACE / PROJECTS">
-      <div style={{ maxWidth: '900px', margin: '0 auto', padding: '24px' }}>
+      <div style={{ maxWidth: '900px', margin: '0 auto', padding: '40px 24px' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '20px' }}>
           <div>
             <h1 style={{ fontSize: '24px', fontWeight: 800, color: '#14213d', margin: 0 }}>

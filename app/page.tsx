@@ -18,6 +18,12 @@ export default function Home() {
   const [notes, setNotes] = useState('')
   const [audioFile, setAudioFile] = useState<File | null>(null)
 
+  const resetForm = useCallback(() => {
+    setTitle('')
+    setNotes('')
+    setAudioFile(null)
+  }, [])
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!title.trim()) {
@@ -84,11 +90,14 @@ export default function Home() {
 
       const approveResult = await approveRes.json()
       if (!approveRes.ok || !approveResult?.project?.id) {
-        setMessage({ type: 'error', text: approveResult?.error || 'Failed to create project.' })
+        const errText = approveResult?.error || 'Failed to create project.'
+        setMessage({ type: 'error', text: `Failed to create project: ${errText}` })
         setLoading(false)
         return
       }
 
+      // Reset form fields before redirecting
+      resetForm()
       setMessage({ type: 'success', text: 'Project created!' })
       setLoading(false)
 
@@ -96,20 +105,20 @@ export default function Home() {
       router.push(`/projects/${approveResult.project.id}`)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'An unexpected error occurred.'
-      setMessage({ type: 'error', text: msg })
+      setMessage({ type: 'error', text: `Failed to create project: ${msg}` })
       setLoading(false)
     }
   }
 
   return (
     <PortalShell title="Home" breadcrumb="WORKSPACE / HOME">
-      <div style={{ maxWidth: 560, margin: '0 auto', padding: 40, textAlign: 'center' }}>
+      <div style={{ maxWidth: 560, margin: '0 auto', padding: '40px 24px', textAlign: 'center' }}>
         {!showForm ? (
           <>
             <h1 style={{ fontSize: 32, fontWeight: 800, color: '#14213d', margin: '0 0 16px' }}>
               Client Serving Portal
             </h1>
-            <p style={{ fontSize: 15, color: '#64748b', margin: '0 0 32px' }}>
+            <p style={{ fontSize: 15, color: '#64748b', margin: '0 0 32px', lineHeight: '1.6' }}>
               Create your first project from a discovery meeting. The client record and project
               workspace are generated immediately — no approval step required.
             </p>

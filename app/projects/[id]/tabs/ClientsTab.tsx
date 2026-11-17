@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, useEffect } from 'react'
 import { supabase } from '@/lib/supabase'
 
 type ClientRecord = {
@@ -15,7 +15,8 @@ type ClientsTabProps = {
   client: ClientRecord | null
 }
 
-export default function ClientsTab({ client }: ClientsTabProps) {
+export default function ClientsTab({ client: initialClient }: ClientsTabProps) {
+  const [client, setClient] = useState<ClientRecord | null>(initialClient ?? null)
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
@@ -24,6 +25,26 @@ export default function ClientsTab({ client }: ClientsTabProps) {
   const [primaryContact, setPrimaryContact] = useState(client?.primary_contact || '')
   const [email, setEmail] = useState(client?.email || '')
   const [phone, setPhone] = useState(client?.phone || '')
+
+  const loadClient = useCallback(async () => {
+    if (!client) return
+    const { data, error } = await supabase
+      .from('clients')
+      .select('id, name, email, phone, primary_contact')
+      .eq('id', client.id)
+      .single()
+    if (!error && data) {
+      setClient(data as ClientRecord)
+      setName(data.name)
+      setPrimaryContact(data.primary_contact || '')
+      setEmail(data.email || '')
+      setPhone(data.phone || '')
+    }
+  }, [client])
+
+  useEffect(() => {
+    loadClient()
+  }, [loadClient])
 
   const handleSave = useCallback(async (e: React.FormEvent) => {
     e.preventDefault()
@@ -52,9 +73,11 @@ export default function ClientsTab({ client }: ClientsTabProps) {
       return
     }
 
+    // Refresh displayed data instantly from the database
+    await loadClient()
     setMessage({ type: 'success', text: 'Client updated!' })
     setEditing(false)
-  }, [client, name, primaryContact, email, phone])
+  }, [client, name, primaryContact, email, phone, loadClient])
 
   if (!client) {
     return (
@@ -99,7 +122,7 @@ export default function ClientsTab({ client }: ClientsTabProps) {
             <input type="tel" className="form-input" value={phone} onChange={(e) => setPhone(e.target.value)} disabled={saving} />
           </div>
           <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: '8px' }}>
-            <button type="button" onClick={() => setEditing(false)} className="portal-btn-secondary" disabled={saving}>
+            <button type="button" onClick={() => { setEditing(false); loadClient() }} className="portal-btn-secondary" disabled={saving}>
               Cancel
             </button>
             <button type="submit" className="portal-btn-primary" disabled={saving}>
