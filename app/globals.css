@@ -2096,6 +2096,15 @@ a {
   font-weight: 700;
 }
 
+[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #0f172a;
+  --foreground: #e5e7eb;
+  --navy: #0b1220;
+  --muted: #94a3b8;
+  --border: #243049;
+}
+
 
 
 
