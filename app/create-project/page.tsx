@@ -245,7 +245,7 @@ function CreateProjectContent({ router }: { router: ReturnType<typeof useRouter>
           </div>
           <div style={{ display: 'flex', gap: 10, justifyContent: 'center', flexWrap: 'wrap' }}>
             <Link data-testid="open-project-link" href={`/projects/${result.projectId}`} className="portal-btn-primary">Open Project Workspace →</Link>
-            <Link href={`/projects/${result.projectId}?tab=documents`} className="portal-btn-secondary">Generate Documents</Link>
+            <Link href={`/projects/${result.projectId}?tab=documents`} className="portal-btn-secondary">Open Documents</Link>
             <Link href={`/projects/${result.projectId}?tab=links`} className="portal-btn-secondary">Add GitHub / Supabase links</Link>
           </div>
         </div>

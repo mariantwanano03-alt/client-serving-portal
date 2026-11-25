@@ -3,6 +3,18 @@
 import React, { useState, useCallback, useEffect } from 'react'
 import { supabase } from '@/lib/supabase'
 import { usePortal } from '@/components/PortalShell'
+import {
+  GENERATION_CONFIG,
+  GENERATION_TYPES,
+  defaultGenerationFields,
+  normalizeGenerationType,
+  validateGenerationFields,
+  type GenerationField,
+  type GenerationFields,
+  type GenerationType,
+  type LineItem,
+  type Milestone,
+} from '@/lib/document-generation'
 
 type DocumentRecord = {
   id: string
@@ -38,20 +50,214 @@ type DocumentsTabProps = {
   readOnly?: boolean
 }
 
-const GENERATE_TYPES = [
-  { label: 'Generate PRD', type: 'PRD' },
-  { label: 'Generate SRS', type: 'SRS' },
-  { label: 'Generate Quotation', type: 'Quotation' },
-  { label: 'Generate Proposal', type: 'Proposal' },
-  { label: 'Generate Invoice', type: 'Invoice' },
-  { label: 'Generate .md File', type: 'md' },
-  { label: 'Generate Transcription', type: 'transcribe' },
-]
-
-const DRAFT_TYPES = [
+const UPLOAD_TYPES = [
   'Requirements', 'Quotation', 'Proposal', 'Timeline', 'SLA',
   'Purchase Order', 'Invoice', 'PRD', 'SRS', 'Handover', 'Other',
 ]
+
+function asLineItems(value: unknown): LineItem[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object' && !Array.isArray(row))
+    .map((row) => ({
+      description: typeof row.description === 'string' ? row.description : '',
+      quantity: typeof row.quantity === 'number' || typeof row.quantity === 'string' ? row.quantity : '',
+      unit_price: typeof row.unit_price === 'number' || typeof row.unit_price === 'string' ? row.unit_price : '',
+    }))
+}
+
+function asMilestones(value: unknown): Milestone[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object' && !Array.isArray(row))
+    .map((row) => ({
+      name: typeof row.name === 'string' ? row.name : '',
+      duration: typeof row.duration === 'string' ? row.duration : '',
+      date: typeof row.date === 'string' ? row.date : '',
+    }))
+}
+
+type DynamicFieldProps = {
+  field: GenerationField
+  value: unknown
+  onChange: (value: unknown) => void
+  compactStyle: React.CSSProperties
+}
+
+function DynamicField({ field, value, onChange, compactStyle }: DynamicFieldProps) {
+  const inputStyle: React.CSSProperties = {
+    ...compactStyle,
+    height: 38,
+    padding: '0 10px',
+  }
+
+  if (field.kind === 'line_items') {
+    const rows = asLineItems(value)
+    const update = (index: number, key: keyof LineItem, next: string) => {
+      const updated = rows.map((row, rowIndex) => rowIndex === index ? { ...row, [key]: next } : row)
+      onChange(updated)
+    }
+    return (
+      <div style={{ marginBottom: 14 }}>
+        <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{field.label}</label>
+        {rows.length === 0 && <p style={{ fontSize: 12, color: 'var(--muted)' }}>No line items added yet.</p>}
+        {rows.map((row, index) => (
+          <div key={index} style={{ display: 'grid', gridTemplateColumns: '2fr 0.7fr 0.9fr auto', gap: 6, marginBottom: 6 }}>
+            <input
+              aria-label={`${field.label} description ${index + 1}`}
+              data-testid={`generation-${field.key}-description-${index}`}
+              placeholder="Description"
+              value={row.description}
+              onChange={(event) => update(index, 'description', event.target.value)}
+              style={inputStyle}
+            />
+            <input
+              aria-label={`${field.label} quantity ${index + 1}`}
+              data-testid={`generation-${field.key}-quantity-${index}`}
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="Qty"
+              value={row.quantity}
+              onChange={(event) => update(index, 'quantity', event.target.value)}
+              style={inputStyle}
+            />
+            <input
+              aria-label={`${field.label} unit price ${index + 1}`}
+              data-testid={`generation-${field.key}-price-${index}`}
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="Unit price"
+              value={row.unit_price}
+              onChange={(event) => update(index, 'unit_price', event.target.value)}
+              style={inputStyle}
+            />
+            <button
+              type="button"
+              aria-label={`Remove line item ${index + 1}`}
+              onClick={() => onChange(rows.filter((_, rowIndex) => rowIndex !== index))}
+              className="portal-btn-secondary"
+              style={{ ...compactStyle, height: 38 }}
+            >
+              Remove
+            </button>
+          </div>
+        ))}
+        <button
+          type="button"
+          data-testid={`generation-${field.key}-add`}
+          onClick={() => onChange([...rows, { description: '', quantity: 1, unit_price: '' }])}
+          className="portal-btn-secondary"
+          style={compactStyle}
+        >
+          Add line item
+        </button>
+        {field.help && <p style={{ fontSize: 11, color: 'var(--muted)', margin: '6px 0 0' }}>{field.help}</p>}
+      </div>
+    )
+  }
+
+  if (field.kind === 'milestones') {
+    const rows = asMilestones(value)
+    const update = (index: number, key: keyof Milestone, next: string) => {
+      const updated = rows.map((row, rowIndex) => rowIndex === index ? { ...row, [key]: next } : row)
+      onChange(updated)
+    }
+    return (
+      <div style={{ marginBottom: 14 }}>
+        <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{field.label}</label>
+        {rows.length === 0 && <p style={{ fontSize: 12, color: 'var(--muted)' }}>No milestones added yet.</p>}
+        {rows.map((row, index) => (
+          <div key={index} style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr 1fr auto', gap: 6, marginBottom: 6 }}>
+            <input
+              aria-label={`Milestone name ${index + 1}`}
+              data-testid={`generation-milestone-name-${index}`}
+              placeholder="Milestone"
+              value={row.name}
+              onChange={(event) => update(index, 'name', event.target.value)}
+              style={inputStyle}
+            />
+            <input
+              aria-label={`Milestone duration ${index + 1}`}
+              data-testid={`generation-milestone-duration-${index}`}
+              placeholder="Duration"
+              value={row.duration}
+              onChange={(event) => update(index, 'duration', event.target.value)}
+              style={inputStyle}
+            />
+            <input
+              aria-label={`Milestone date ${index + 1}`}
+              data-testid={`generation-milestone-date-${index}`}
+              type="date"
+              value={row.date}
+              onChange={(event) => update(index, 'date', event.target.value)}
+              style={inputStyle}
+            />
+            <button
+              type="button"
+              aria-label={`Remove milestone ${index + 1}`}
+              onClick={() => onChange(rows.filter((_, rowIndex) => rowIndex !== index))}
+              className="portal-btn-secondary"
+              style={{ ...compactStyle, height: 38 }}
+            >
+              Remove
+            </button>
+          </div>
+        ))}
+        <button
+          type="button"
+          data-testid="generation-milestones-add"
+          onClick={() => onChange([...rows, { name: '', duration: '', date: '' }])}
+          className="portal-btn-secondary"
+          style={compactStyle}
+        >
+          Add milestone
+        </button>
+        {field.help && <p style={{ fontSize: 11, color: 'var(--muted)', margin: '6px 0 0' }}>{field.help}</p>}
+      </div>
+    )
+  }
+
+  if (field.kind === 'textarea') {
+    return (
+      <div style={{ marginBottom: 14 }}>
+        <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
+          {field.label}{field.required ? ' *' : ''}
+        </label>
+        <textarea
+          aria-label={field.label}
+          data-testid={`generation-field-${field.key}`}
+          rows={3}
+          placeholder={field.placeholder}
+          value={typeof value === 'string' ? value : ''}
+          onChange={(event) => onChange(event.target.value)}
+          style={{ ...compactStyle, height: 'auto', padding: 10, lineHeight: 1.45, resize: 'vertical' }}
+        />
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
+        {field.label}{field.required ? ' *' : ''}
+      </label>
+      <input
+        aria-label={field.label}
+        data-testid={`generation-field-${field.key}`}
+        type={field.kind === 'date' ? 'date' : field.kind === 'number' ? 'number' : 'text'}
+        min={field.kind === 'number' ? field.min : undefined}
+        step={field.kind === 'number' ? '0.01' : undefined}
+        placeholder={field.placeholder}
+        value={typeof value === 'string' || typeof value === 'number' ? String(value) : ''}
+        onChange={(event) => onChange(event.target.value)}
+        style={inputStyle}
+      />
+      {field.help && <p style={{ fontSize: 11, color: 'var(--muted)', margin: '6px 0 0' }}>{field.help}</p>}
+    </div>
+  )
+}
 
 function statusLabel(status: string) {
   switch (status) {
@@ -76,17 +282,16 @@ export default function DocumentsTab({ projectId, readOnly = false }: DocumentsT
   const { role } = usePortal()
   const isSenior = role === 'senior_dev_pm'
   const [documents, setDocuments] = useState<DocumentRecord[]>([])
-  const [loading, setLoading] = useState(false)
-  const [generating, setGenerating] = useState<string | null>(null)
+  const [generating, setGenerating] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
 
-  const [draftModalOpen, setDraftModalOpen] = useState(false)
-  const [draftType, setDraftType] = useState(DRAFT_TYPES[0])
-  const [draftTitle, setDraftTitle] = useState(`${DRAFT_TYPES[0]} Draft`)
-  const [creatingDraft, setCreatingDraft] = useState(false)
+  const [generateStep, setGenerateStep] = useState<'type' | 'form' | null>(null)
+  const [selectedType, setSelectedType] = useState<GenerationType | null>(null)
+  const [formFields, setFormFields] = useState<GenerationFields>({})
+  const [generationError, setGenerationError] = useState('')
 
   const [uploadModalOpen, setUploadModalOpen] = useState(false)
-  const [uploadType, setUploadType] = useState(DRAFT_TYPES[0])
+  const [uploadType, setUploadType] = useState(UPLOAD_TYPES[0])
   const [uploadTitle, setUploadTitle] = useState('')
   const [uploadFile, setUploadFile] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
@@ -110,7 +315,10 @@ export default function DocumentsTab({ projectId, readOnly = false }: DocumentsT
   }, [projectId])
 
   useEffect(() => {
-    void loadDocuments()
+    // Defer the initial fetch so React does not warn about a synchronous
+    // setState call during the effect body.
+    const timeout = window.setTimeout(() => { void loadDocuments() }, 0)
+    return () => window.clearTimeout(timeout)
   }, [loadDocuments])
 
   const authFetch = async (url: string, options: RequestInit = {}) => {
@@ -190,57 +398,66 @@ export default function DocumentsTab({ projectId, readOnly = false }: DocumentsT
     }
   }
 
-  const handleGenerate = async (type: string) => {
+  const openGenerateModal = () => {
     if (readOnly) return
-    setGenerating(type)
+    setGenerateStep('type')
+    setSelectedType(null)
+    setFormFields({})
+    setGenerationError('')
     setMessage(null)
-    try {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (!session) throw new Error('Not authenticated.')
-      if (type === 'transcribe') {
-        setMessage({ type: 'error', text: 'Record a session first, then generate transcription.' })
-        return
-      }
-      const res = await fetch('/api/generate-document', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({ project_id: projectId, type, title: `${type} Document` }),
-      })
-      const result = await res.json()
-      if (!res.ok) throw new Error(result.error || `Failed to generate ${type}.`)
-      setMessage({ type: 'success', text: `${type} generated!` })
-      await loadDocuments()
-    } catch (err: unknown) {
-      setMessage({ type: 'error', text: err instanceof Error ? err.message : `Failed to generate ${type}.` })
-    } finally {
-      setGenerating(null)
-    }
   }
 
-  const handleCreateDraft = async () => {
-    setCreatingDraft(true)
+  const chooseGenerationType = (type: GenerationType) => {
+    setSelectedType(type)
+    setFormFields(defaultGenerationFields(type))
+    setGenerationError('')
+  }
+
+  const continueToForm = () => {
+    if (!selectedType) {
+      setGenerationError('Select a document type to continue.')
+      return
+    }
+    setGenerationError('')
+    setGenerateStep('form')
+  }
+
+  const updateGenerationField = (key: string, value: unknown) => {
+    setFormFields((previous) => ({ ...previous, [key]: value }))
+    setGenerationError('')
+  }
+
+  const submitGeneration = async () => {
+    const type = selectedType && normalizeGenerationType(selectedType)
+    if (!type) {
+      setGenerationError('Select a document type first.')
+      return
+    }
+    const validationError = validateGenerationFields(type, formFields)
+    if (validationError) {
+      setGenerationError(validationError)
+      return
+    }
+
+    setGenerating(true)
+    setGenerationError('')
     setMessage(null)
     try {
-      const result = await authFetch('/api/documents', {
+      const result = await authFetch('/api/generate-document', {
         method: 'POST',
         body: JSON.stringify({
           project_id: projectId,
-          type: draftType,
-          title: draftTitle.trim() || `${draftType} Draft`,
-          content: '',
+          type,
+          fields: formFields,
         }),
       })
-      setDraftModalOpen(false)
-      setMessage({ type: 'success', text: 'Draft created. Add content below.' })
+      setGenerateStep(null)
+      setMessage({ type: 'success', text: result.message || 'Document created as a draft. Review and submit it for approval.' })
       await loadDocuments()
-      await openDocument(result.document.id, true)
     } catch (err: unknown) {
-      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Could not create draft.' })
+      setGenerationError(err instanceof Error ? err.message : 'Could not generate document.')
     } finally {
-      setCreatingDraft(false)
+      setGenerating(false)
     }
   }
 
@@ -340,12 +557,12 @@ export default function DocumentsTab({ projectId, readOnly = false }: DocumentsT
         {!readOnly && (
           <button
             type="button"
-            data-testid="draft-document-button"
-            onClick={() => setDraftModalOpen(true)}
+            data-testid="generate-document-button"
+            onClick={openGenerateModal}
             className="portal-btn-primary"
             style={buttonStyle}
           >
-            Draft Document
+            Generate Document
           </button>
         )}
         {!readOnly && (
@@ -359,18 +576,6 @@ export default function DocumentsTab({ projectId, readOnly = false }: DocumentsT
             Upload Document
           </button>
         )}
-        {!readOnly && GENERATE_TYPES.map((dt) => (
-          <button
-            key={dt.type}
-            type="button"
-            onClick={() => handleGenerate(dt.type)}
-            disabled={generating === dt.type}
-            className="portal-btn-secondary"
-            style={{ ...buttonStyle, opacity: generating === dt.type ? 0.7 : 1 }}
-          >
-            {generating === dt.type ? 'Generating…' : dt.label}
-          </button>
-        ))}
       </div>
 
       {message && (
@@ -386,7 +591,7 @@ export default function DocumentsTab({ projectId, readOnly = false }: DocumentsT
 
       {documents.length === 0 ? (
         <div style={{ color: 'var(--muted-light)', fontSize: '13px', paddingTop: '8px' }}>
-          {readOnly ? 'No documents recorded for this project.' : 'No documents yet. Draft, upload or generate one above.'}
+          {readOnly ? 'No documents recorded for this project.' : 'No documents yet. Generate or upload one above.'}
         </div>
       ) : (
         <div style={{ border: '1px solid var(--border)', borderRadius: '10px', overflow: 'hidden' }}>
@@ -440,37 +645,110 @@ export default function DocumentsTab({ projectId, readOnly = false }: DocumentsT
         </div>
       )}
 
-      {draftModalOpen && (
-        <div className="portal-modal-overlay" data-testid="draft-modal" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}>
-          <div style={{ width: 'min(440px, 100%)', background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 12, padding: 20, boxShadow: '0 20px 60px rgba(0,0,0,0.25)' }}>
-            <h3 style={{ margin: '0 0 14px', fontSize: 17, color: 'var(--heading)' }}>Draft Document</h3>
-            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Document type</label>
-            <select
-              data-testid="draft-type-select"
-              aria-label="Document type"
-              value={draftType}
-              onChange={(event) => {
-                setDraftType(event.target.value)
-                if (draftTitle.endsWith(' Draft')) setDraftTitle(`${event.target.value} Draft`)
-              }}
-              style={{ width: '100%', height: 38, marginBottom: 12, padding: '0 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: 13 }}
-            >
-              {DRAFT_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
-            </select>
-            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Title</label>
-            <input
-              data-testid="draft-title-input"
-              aria-label="Draft title"
-              value={draftTitle}
-              onChange={(event) => setDraftTitle(event.target.value)}
-              style={{ width: '100%', height: 38, marginBottom: 16, padding: '0 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: 13 }}
-            />
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-              <button type="button" onClick={() => setDraftModalOpen(false)} className="portal-btn-secondary" style={buttonStyle}>Cancel</button>
-              <button type="button" data-testid="create-draft-submit" onClick={handleCreateDraft} disabled={creatingDraft} className="portal-btn-primary" style={buttonStyle}>
-                {creatingDraft ? 'Creating…' : 'Create Draft'}
+      {generateStep && (
+        <div className="portal-modal-overlay" data-testid="generate-modal" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}>
+          <div style={{ width: 'min(720px, 100%)', maxHeight: '90vh', overflow: 'auto', background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 12, padding: 20, boxShadow: '0 20px 60px rgba(0,0,0,0.25)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 14 }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: 18, color: 'var(--heading)' }}>Generate Document</h3>
+                <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--muted)' }}>
+                  {generateStep === 'type'
+                    ? 'Choose the document type. The correct form, template and validation will open next.'
+                    : `${GENERATION_CONFIG[selectedType!].label} · project and client are attached automatically.`}
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Close generate document"
+                onClick={() => setGenerateStep(null)}
+                className="portal-btn-secondary"
+                style={buttonStyle}
+              >
+                Close
               </button>
             </div>
+
+            {generationError && (
+              <div data-testid="generation-error" role="alert" style={{ padding: '9px 11px', marginBottom: 12, borderRadius: 8, background: 'var(--error-bg)', border: '1px solid var(--error-border)', color: 'var(--error-text)', fontSize: 12 }}>
+                {generationError}
+              </div>
+            )}
+
+            {generateStep === 'type' ? (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
+                  {GENERATION_TYPES.map((type) => {
+                    const config = GENERATION_CONFIG[type]
+                    const active = selectedType === type
+                    return (
+                      <button
+                        key={type}
+                        type="button"
+                        data-testid={`generate-type-${type}`}
+                        aria-pressed={active}
+                        onClick={() => chooseGenerationType(type)}
+                        style={{
+                          textAlign: 'left',
+                          padding: '12px 14px',
+                          borderRadius: 10,
+                          border: `1px solid ${active ? 'var(--accent-strong)' : 'var(--border)'}`,
+                          background: active ? 'var(--accent-soft)' : 'var(--surface-alt)',
+                          color: 'var(--text)',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <strong style={{ display: 'block', fontSize: 13, color: 'var(--heading)' }}>{config.label}</strong>
+                        <span style={{ display: 'block', marginTop: 4, fontSize: 11, color: 'var(--muted)' }}>{config.description}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+                  <button type="button" onClick={() => setGenerateStep(null)} className="portal-btn-secondary" style={buttonStyle}>Cancel</button>
+                  <button
+                    type="button"
+                    data-testid="generate-continue"
+                    onClick={continueToForm}
+                    disabled={!selectedType}
+                    className="portal-btn-primary"
+                    style={{ ...buttonStyle, opacity: selectedType ? 1 : 0.55 }}
+                  >
+                    Continue
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <button type="button" onClick={() => setGenerateStep('type')} className="portal-btn-secondary" style={{ ...smallButtonStyle, marginBottom: 14 }}>
+                  ← Change document type
+                </button>
+                {GENERATION_CONFIG[selectedType!].fields.map((field) => (
+                  <DynamicField
+                    key={field.key}
+                    field={field}
+                    value={formFields[field.key]}
+                    onChange={(value) => updateGenerationField(field.key, value)}
+                    compactStyle={{ width: '100%', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: 13 }}
+                  />
+                ))}
+                <p style={{ fontSize: 11, color: 'var(--muted)', margin: '2px 0 14px' }}>
+                  The draft is saved in the portal and submitted for senior review by you afterwards. No financial values are invented.
+                </p>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                  <button type="button" onClick={() => setGenerateStep('type')} className="portal-btn-secondary" style={buttonStyle}>Back</button>
+                  <button
+                    type="button"
+                    data-testid="generate-submit"
+                    onClick={submitGeneration}
+                    disabled={generating}
+                    className="portal-btn-primary"
+                    style={buttonStyle}
+                  >
+                    {generating ? 'Generating…' : 'Generate Draft'}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -487,7 +765,7 @@ export default function DocumentsTab({ projectId, readOnly = false }: DocumentsT
               onChange={(event) => setUploadType(event.target.value)}
               style={{ width: '100%', height: 38, marginBottom: 12, padding: '0 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: 13 }}
             >
-              {DRAFT_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
+              {UPLOAD_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
             </select>
             <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Title (optional)</label>
             <input

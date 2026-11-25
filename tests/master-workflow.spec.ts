@@ -24,7 +24,7 @@ const JUNIOR_EMAIL = 'alex@test.com'
 const SENIOR_EMAIL = 'elena@test.com'
 const CLIENT_EMAIL = 'musainnocent456@gmail.com'
 const TOKEN = new Date().toISOString().replace(/[^0-9]/g, '').slice(-10)
-const DRAFT_TITLE = `Workflow Proposal ${TOKEN}`
+let generatedDraftTitle = ''
 const REJECTION_REASON = `Please add a delivery timeline before approval (${TOKEN}).`
 
 type Json = Record<string, unknown>
@@ -267,21 +267,29 @@ test('Visible master workflow — assignment, documents, review, permissions and
   })
 
   const { projectId, projectReference, projectName } = created
+  generatedDraftTitle = `Proposal — ${projectName}`
 
   // -------------------------------------------------------------- JUNIOR DOCUMENT
-  const documentId = await step('Junior drafts, edits and submits a document', '02-junior-draft-submitted.png', async () => {
+  const documentId = await step('Junior generates, edits and submits a document draft', '02-junior-draft-submitted.png', async () => {
     await page.getByRole('button', { name: 'Documents', exact: true }).click()
-    await expect(page.getByTestId('draft-document-button')).toHaveCount(1)
-    await page.getByTestId('draft-document-button').click()
-    await expect(page.getByTestId('draft-modal')).toBeVisible()
-    await page.getByTestId('draft-type-select').selectOption('Proposal')
-    await page.getByTestId('draft-title-input').fill(DRAFT_TITLE)
-    await page.getByTestId('create-draft-submit').click()
+    await expect(page.getByTestId('generate-document-button')).toHaveCount(1)
+    await page.getByTestId('generate-document-button').click()
+    await expect(page.getByTestId('generate-modal')).toBeVisible()
+    await page.getByTestId('generate-type-Proposal').click()
+    await page.getByTestId('generate-continue').click()
+    await expect(page.getByTestId('generation-field-overview')).toBeVisible()
+    await page.getByTestId('generation-field-overview').fill(`${projectName} will be delivered in agreed phases.`)
+    await page.getByTestId('generation-field-objectives').fill('Launch a working client portal and hand over clean documentation.')
+    await page.getByTestId('generation-field-scope').fill('Portal build, document workflows and client access.')
+    await page.getByTestId('generation-field-solution').fill('Use the existing Next.js portal and Supabase workflows.')
+    await page.getByTestId('generate-submit').click()
+    await expect(page.getByTestId('documents-message')).toContainText('created as a draft', { timeout: 20000 })
 
-    await expect(page.getByTestId('document-editor')).toBeVisible()
+    await openDraft(page, generatedDraftTitle)
     const content = page.getByTestId('document-content')
     await expect(content).toBeEnabled()
-    await content.fill('Initial proposal content prepared by the junior developer.')
+    await expect(content).toContainText(projectName)
+    await content.fill(`${await content.inputValue()}\n\nJunior edit: delivery sequence confirmed.`)
     await page.getByTestId('save-document').click()
     await expect(page.getByTestId('documents-message')).toContainText('saved')
 
@@ -294,7 +302,7 @@ test('Visible master workflow — assignment, documents, review, permissions and
       .from('documents')
       .select('id, status, title')
       .eq('project_id', projectId)
-      .eq('title', DRAFT_TITLE)
+      .eq('title', generatedDraftTitle)
       .single()
     expect(error).toBeNull()
     expect(data?.status).toBe('pending_review')
@@ -416,7 +424,7 @@ test('Visible master workflow — assignment, documents, review, permissions and
   await step('Senior rejects with a visible reason', '06-senior-rejected.png', async () => {
     await switchUser(page, SENIOR_EMAIL, PASSWORD)
     await openProjectByReference(page, projectReference)
-    await openDraft(page, DRAFT_TITLE)
+    await openDraft(page, generatedDraftTitle)
     await page.getByTestId('rejection-reason').fill(REJECTION_REASON)
     await page.getByTestId('reject-document').click()
     await expect(page.getByTestId('documents-message')).toContainText('rejected')
@@ -449,7 +457,7 @@ test('Visible master workflow — assignment, documents, review, permissions and
   await step('Junior sees the reason, revises and resubmits', '08-junior-resubmitted.png', async () => {
     await switchUser(page, JUNIOR_EMAIL, PASSWORD)
     await page.goto(`/projects/${projectId}?tab=documents`)
-    await openDraft(page, DRAFT_TITLE)
+    await openDraft(page, generatedDraftTitle)
     await expect(page.getByTestId('rejection-reason-display')).toContainText('Please add a delivery timeline')
     await page.getByTestId('document-content').fill(
       'Initial proposal content prepared by the junior developer. Revised delivery timeline: two weeks after approval.'
@@ -482,7 +490,7 @@ test('Visible master workflow — assignment, documents, review, permissions and
   await step('Senior approves and downloads a real PDF', '10-senior-approved.png', async () => {
     await switchUser(page, SENIOR_EMAIL, PASSWORD)
     await page.goto(`/projects/${projectId}?tab=documents`)
-    await openDraft(page, DRAFT_TITLE)
+    await openDraft(page, generatedDraftTitle)
     await expect(page.getByTestId('approve-document')).toBeVisible()
     await page.getByTestId('approve-document').click()
     await expect(page.getByTestId('documents-message')).toContainText('approved')

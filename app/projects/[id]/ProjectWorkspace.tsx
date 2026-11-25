@@ -4,6 +4,7 @@ import React, { useEffect, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { usePortal } from '@/components/PortalShell'
+import DevelopmentReadinessPanel from '@/components/DevelopmentReadinessPanel'
 
 import ClientsTab from './tabs/ClientsTab'
 import DocumentsTab from './tabs/DocumentsTab'
@@ -250,6 +251,8 @@ export default function ProjectWorkspace({
           )}
         </div>
       )}
+
+      <DevelopmentReadinessPanel projectId={id} refreshKey={activeTab} />
 
       <div className="project-workspace-tabs" style={{ borderBottom: '1.5px solid var(--border-strong)', marginBottom: '24px', display: 'flex', gap: '0' }}>
         {TABS.map((tab) => (

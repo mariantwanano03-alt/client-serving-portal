@@ -1,14 +1,24 @@
 import { NextResponse } from 'next/server'
 import { writeAudit } from '@/lib/audit'
 import { denyBusinessOperation, resolveCaller } from '@/lib/authz'
+import {
+  buildGeneratedContent,
+  GENERATION_CONFIG,
+  labelForGenerationType,
+  normalizeGenerationType,
+  validateGenerationFields,
+  type FinancialContext,
+  type GenerationFields,
+  type GenerationType,
+} from '@/lib/document-generation'
 import { canAccessProject } from '@/lib/project-access'
 import { getSupabaseAdmin } from '@/lib/supabaseAdmin'
 
 // ─── POST /api/generate-document ─────────────────────────────────────────
 // Generate a document from the REAL details already stored for the project:
-// project record, client record, reviewed discovery facts and transcript.
-// No placeholder/lorem text is ever written. AI-generated documents do not
-// require the senior approval step (only manually edited documents do).
+// project/client records, reviewed discovery facts and the recorded financial
+// overview. The document is always saved as an editable draft and must pass
+// the existing senior review workflow before it can be approved.
 export async function POST(req: Request) {
   const denied = await denyBusinessOperation(req)
   if (denied) return denied
@@ -20,43 +30,76 @@ export async function POST(req: Request) {
 
   try {
     const body = await req.json()
-    const { project_id, type, title, persist } = body as {
-      project_id?: string
-      type?: string
-      title?: string
-      persist?: boolean
+    const projectId = typeof body?.project_id === 'string' ? body.project_id.trim() : ''
+    const requestedType = body?.type
+    const fields = body?.fields
+    const title = typeof body?.title === 'string' ? body.title.trim() : ''
+    const persist = body?.persist !== false
+
+    if (!projectId) {
+      return NextResponse.json({ error: 'A project is required.' }, { status: 400 })
     }
 
-    if (!project_id) {
-      return NextResponse.json({ error: 'project_id is required.' }, { status: 400 })
-    }
+    const type = normalizeGenerationType(requestedType)
     if (!type) {
-      return NextResponse.json({ error: 'Document type is required.' }, { status: 400 })
+      return NextResponse.json({ error: 'Choose a supported document type.' }, { status: 400 })
+    }
+    if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+      return NextResponse.json({ error: 'Document fields are required.' }, { status: 400 })
     }
 
-    // 1. Real project + client data
-    // Caller-scoped reads keep project/document visibility enforced by RLS.
+    const validationError = validateGenerationFields(type, fields as GenerationFields)
+    if (validationError) {
+      return NextResponse.json({ error: validationError }, { status: 400 })
+    }
+
+    // Caller-scoped reads keep project, document and financial visibility
+    // enforced by RLS before any trusted writer is used.
     const { data: project, error: projError } = await caller.db
       .from('projects')
       .select('id, project_reference, name, description, stage, status, client_id, clients(name, primary_contact, email, phone)')
-      .eq('id', project_id)
-      .single()
+      .eq('id', projectId)
+      .maybeSingle()
 
     if (projError || !project) {
       return NextResponse.json({ error: 'Project not found.' }, { status: 404 })
     }
     const client = Array.isArray(project.clients) ? project.clients[0] : project.clients
-    const clientName = client?.name || 'Not recorded'
 
-    // 2. Real reviewed facts + transcript from documents already in the project
+    const admin = getSupabaseAdmin()
+    if (!(await canAccessProject(admin, user.id, caller.role, project.id))) {
+      return NextResponse.json({ error: 'You do not have access to this project.' }, { status: 403 })
+    }
+
+    const { data: financialRow } = await caller.db
+      .from('pts_deposit_overview')
+      .select('currency, reference, due_date, required_cents, paid_cents, outstanding_cents, status, requirement_status')
+      .eq('project_id', project.id)
+      .order('reference', { ascending: true })
+      .limit(1)
+      .maybeSingle()
+
+    const financial: FinancialContext | null = financialRow
+      ? {
+          currency: (financialRow.currency as string | null) ?? null,
+          reference: (financialRow.reference as string | null) ?? null,
+          dueDate: (financialRow.due_date as string | null) ?? null,
+          requiredCents: Number(financialRow.required_cents) || 0,
+          paidCents: Number(financialRow.paid_cents) || 0,
+          outstandingCents: Number(financialRow.outstanding_cents) || 0,
+          status: (financialRow.status as string | null) ?? null,
+          requirementStatus: (financialRow.requirement_status as string | null) ?? null,
+        }
+      : null
+
     const { data: existingDocs } = await caller.db
       .from('documents')
       .select('id, type, current_revision_id')
-      .eq('project_id', project_id)
+      .eq('project_id', project.id)
 
     const revisionIds = (existingDocs || [])
-      .map((d) => d.current_revision_id)
-      .filter((id): id is string => !!id)
+      .map((doc) => doc.current_revision_id)
+      .filter((id): id is string => Boolean(id))
 
     let revisions: { document_id: string; content: string | null }[] = []
     if (revisionIds.length) {
@@ -69,128 +112,117 @@ export async function POST(req: Request) {
 
     const facts: Record<string, string> = {}
     let transcript = ''
-    for (const rev of revisions) {
-      const content = rev.content || ''
-      // Meeting facts were stored as "- **Label:** value" by project creation.
+    for (const revision of revisions) {
+      const content = revision.content || ''
+      // Discovery facts were stored as "- **Label:** value" by project creation.
       for (const line of content.split(/\r?\n/)) {
         const match = line.match(/^\s*[-*]\s*\*\*(.+?):\*\*\s*(.+)$/)
         if (match) facts[match[1].trim()] = match[2].trim()
       }
-      const docType = (existingDocs || []).find((d) => d.id === rev.document_id)?.type
-      if (docType === 'Transcript' || /^## (?:Meeting transcript|Transcript)\s*$/im.test(content)) {
+      const documentType = (existingDocs || []).find((doc) => doc.id === revision.document_id)?.type
+      if (documentType === 'Transcript' || /^## (?:Meeting transcript|Transcript)\s*$/im.test(content)) {
         const section = content.replace(/^[\s\S]*?## (?:Meeting transcript|Transcript)\s*\n/i, '').split(/\n---/)[0].trim()
         if (section && section.length > transcript.length) transcript = section
       }
     }
 
-    const docTitle = (title || `${type} Document`).trim()
-    const content = buildContent({
+    const docTitle = (title || `${labelForGenerationType(type)} — ${project.name}`).slice(0, 200)
+    const content = buildGeneratedContent({
       type,
       title: docTitle,
       project: {
         name: project.name,
         reference: project.project_reference,
         description: project.description || '',
-        stage: project.stage,
-        status: project.status,
+        stage: project.stage || '',
+        status: project.status || '',
       },
       client: {
-        name: clientName,
+        name: client?.name || 'Not recorded',
         primaryContact: client?.primary_contact || '',
         email: client?.email || '',
         phone: client?.phone || '',
       },
       facts,
       transcript,
-      generatedBy: user.email || user.id,
+      fields: fields as GenerationFields,
+      financial,
     })
 
-    // Download-only mode: return the content without creating another document.
-    if (persist === false) {
-      return NextResponse.json({ content, title: docTitle })
+    if (!persist) {
+      return NextResponse.json({ content, title: docTitle, type, status: 'draft' })
     }
 
-    // The caller-scoped project read above already enforces project access.
-    // Make that boundary explicit before using the trusted writer: generated
-    // documents are system-approved, but only authorised staff may request
-    // them. Manual uploads continue to enter pending_review through their own
-    // API and can never reach this path.
-    const admin = getSupabaseAdmin()
-    if (!(await canAccessProject(admin, user.id, caller.role, project.id))) {
-      return NextResponse.json({ error: 'You do not have access to this project.' }, { status: 403 })
-    }
-
-    const { data: docData, error: docErr } = await admin
+    const { data: document, error: documentError } = await admin
       .from('documents')
       .insert({
         project_id: project.id,
         title: docTitle,
         type,
-        status: 'approved',
+        status: 'draft',
       })
-      .select('id')
+      .select('id, project_id, title, type, status')
       .single()
 
-    if (docErr || !docData) {
-      return NextResponse.json({ error: docErr?.message || 'Failed to create document.' }, { status: 500 })
+    if (documentError || !document) {
+      return NextResponse.json({ error: documentError?.message || 'Failed to create document.' }, { status: 500 })
     }
 
-    const { data: revData, error: revErr } = await admin
+    const { data: revision, error: revisionError } = await admin
       .from('document_revisions')
       .insert({
-        document_id: docData.id,
+        document_id: document.id,
         revision_no: 1,
         ai_generated: true,
         created_by: user.id,
-        status: 'approved',
+        status: 'draft',
         source: 'ai',
         content,
       })
-      .select('id')
+      .select('id, revision_no, content, status')
       .single()
 
-    if (revErr || !revData) {
-      return NextResponse.json({ error: revErr?.message || 'Failed to create document revision.' }, { status: 500 })
+    if (revisionError || !revision) {
+      return NextResponse.json({ error: revisionError?.message || 'Failed to create document revision.' }, { status: 500 })
     }
 
     await admin.from('document_versions').insert({
-      document_id: docData.id,
-      revision_id: revData.id,
+      document_id: document.id,
+      revision_id: revision.id,
       version_no: 1,
-      title: docTitle,
+      title: document.title,
       content,
-      change_summary: 'Generated from stored project and discovery data',
+      change_summary: `Generated ${GENERATION_CONFIG[type as GenerationType].label} from stored project and discovery data`,
       created_by: user.id,
     })
 
     await admin
       .from('documents')
-      .update({ current_revision_id: revData.id })
-      .eq('id', docData.id)
+      .update({ current_revision_id: revision.id })
+      .eq('id', document.id)
 
     await writeAudit(caller.db, {
       action: 'document.generated',
       entity_type: 'document',
-      entity_id: docData.id,
+      entity_id: document.id,
       after_value: {
+        status: 'draft',
         project_id: project.id,
         project_name: project.name,
-        title: docTitle,
+        title: document.title,
         type,
         revision_no: 1,
       },
     })
 
     return NextResponse.json({
+      message: `${labelForGenerationType(type)} created as a draft. Review it, then submit it for senior review.`,
       document: {
-        id: docData.id,
-        title: docTitle,
-        type,
-        status: 'approved',
-        project_id: project.id,
-        revision_id: revData.id,
-        revision_no: 1,
+        ...document,
+        current_revision_id: revision.id,
+        revision_no: revision.revision_no,
         content,
+        status: 'draft',
       },
     })
   } catch (err: unknown) {
@@ -199,105 +231,4 @@ export async function POST(req: Request) {
       { status: 500 }
     )
   }
-}
-
-type ContentInput = {
-  type: string
-  title: string
-  project: { name: string; reference: string; description: string; stage: string; status: string }
-  client: { name: string; primaryContact: string; email: string; phone: string }
-  facts: Record<string, string>
-  transcript: string
-  generatedBy: string
-}
-
-function fact(input: ContentInput, label: string): string {
-  return input.facts[label] || ''
-}
-
-function factsBlock(input: ContentInput, labels: string[]): string {
-  const rows = labels
-    .map((label) => ({ label, value: fact(input, label) }))
-    .filter((row) => !!row.value)
-    .map((row) => `- **${row.label}:** ${row.value}`)
-  return rows.length ? rows.join('\n') : '- No details were captured for this section during discovery.'
-}
-
-function buildContent(input: ContentInput): string {
-  const header = [
-    `# ${input.title}`,
-    '',
-    `**Project:** ${input.project.name} (${input.project.reference})`,
-    `**Client:** ${input.client.name}`,
-    `**Project stage:** ${input.project.stage} · **Status:** ${input.project.status}`,
-    `**Generated:** ${new Date().toISOString()} by ${input.generatedBy}`,
-    '',
-  ].join('\n')
-
-  let body = ''
-  switch (input.type) {
-    case 'PRD':
-      body = [
-        '## Product Requirements',
-        factsBlock(input, ['Business requirements', 'Client objectives', 'Required services', 'Problems / challenges', 'Industry', 'Company description']),
-        '',
-        '## Stakeholders',
-        factsBlock(input, ['Primary contact', 'Contact email', 'Contact phone']),
-      ].join('\n')
-      break
-    case 'SRS':
-      body = [
-        '## Functional Requirements',
-        factsBlock(input, ['Required services', 'Business requirements']),
-        '',
-        '## Objectives and Constraints',
-        factsBlock(input, ['Client objectives', 'Problems / challenges', 'Company description', 'Industry']),
-      ].join('\n')
-      break
-    case 'Proposal':
-      body = [
-        '## Understanding of the Client',
-        factsBlock(input, ['Company description', 'Industry', 'Problems / challenges']),
-        '',
-        '## Proposed Scope',
-        factsBlock(input, ['Required services', 'Business requirements', 'Client objectives']),
-      ].join('\n')
-      break
-    case 'Handover':
-      body = [
-        '## Captured Discovery Details',
-        factsBlock(input, ['Primary contact', 'Contact email', 'Contact phone', 'Company address', 'Company description', 'Industry', 'Business requirements', 'Client objectives', 'Problems / challenges', 'Required services', 'Additional notes']),
-      ].join('\n')
-      break
-    case 'Quotation':
-    case 'Invoice':
-      body = [
-        `**Billed party:** ${input.client.name}`,
-        `**Attention:** ${input.client.primaryContact || 'Not recorded'}`,
-        '',
-        '## Scope (from discovery)',
-        factsBlock(input, ['Required services', 'Business requirements']),
-        '',
-        '> Pricing was not captured during discovery and must be completed by an authorised staff member before this document is issued.',
-      ].join('\n')
-      break
-    case 'Transcript':
-      body = [
-        '## Discovery Meeting Transcript',
-        input.transcript || 'No meeting transcript has been recorded for this project.',
-      ].join('\n')
-      break
-    default:
-      body = [
-        '## Project Details',
-        input.project.description || 'No additional project description was recorded.',
-        '',
-        '## Captured Discovery Details',
-        factsBlock(input, ['Primary contact', 'Contact email', 'Contact phone', 'Company address', 'Company description', 'Industry', 'Business requirements', 'Client objectives', 'Problems / challenges', 'Required services', 'Additional notes']),
-      ].join('\n')
-  }
-
-  const transcriptSection = input.type === 'Transcript' ? '' : `\n\n## Source Transcript\n${input.transcript || 'No meeting transcript was recorded for this project.'}`
-
-  return `${header}${body}${transcriptSection}\n`
 }

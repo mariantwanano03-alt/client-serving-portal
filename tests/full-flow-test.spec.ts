@@ -56,12 +56,17 @@ test('Full flow: Login → Create Project → Audio → Details → Documents �
   // ==========================================
   // STEP 5: GENERATE DOCUMENTS
   // ==========================================
-  console.log('\n=== STEP 5: GENERATE DOCUMENTS ===');
-  const genButtons = page.locator('button:has-text("Generate")');
-  console.log('Generate buttons:', await genButtons.count());
-  
-  const specificGen = page.locator('button:has-text("Generate PRD"), button:has-text("Generate SRS"), button:has-text("Generate Quotation"), button:has-text("Generate Proposal"), button:has-text("Generate Invoice")');
-  console.log('Specific gen buttons:', await specificGen.count());
+  console.log('\n=== STEP 5: DOCUMENT GENERATION SURFACE ===');
+  // The create-project page intentionally links to the workspace instead of
+  // exposing generation buttons. The single Generate Document button lives on
+  // the project Documents tab and is asserted in generation-readiness.spec.ts.
+  const centralGen = page.getByRole('button', { name: 'Generate Document', exact: true });
+  const legacyGen = page.locator('button:has-text("Generate PRD"), button:has-text("Generate SRS"), button:has-text("Generate Quotation"), button:has-text("Generate Proposal"), button:has-text("Generate Invoice"), button:has-text("Generate .md File"), button:has-text("Generate Transcription"), button:has-text("Draft Document")');
+  console.log('Central Generate Document buttons on create-project page:', await centralGen.count());
+  console.log('Legacy generation buttons:', await legacyGen.count());
+  expect(await legacyGen.count()).toBe(0);
+  const openDocsLinks = page.getByRole('link', { name: 'Open Documents' });
+  console.log('Open Documents links:', await openDocsLinks.count());
 
   // ==========================================
   // STEP 6: ADD URLs
@@ -86,7 +91,7 @@ test('Full flow: Login → Create Project → Audio → Details → Documents �
   console.log('2. Create Project: ✅');
   console.log('3. Audio Recorder UI: ✅ Buttons present');
   console.log('4. Client/Project Details: ✅ Fields present');
-  console.log('5. Document Generation: ✅ Buttons present');
+  console.log('5. Document Generation: ✅ No legacy buttons; central button is in the workspace');
   console.log('6. URL Linking: ✅ Fields present');
   console.log('\n=== FLOW COMPLETE ===');
 });

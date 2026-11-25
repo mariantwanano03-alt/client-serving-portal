@@ -71,13 +71,21 @@ const ACTION_LABELS: Record<string, string> = {
   'user.role_reactivated': 'Account reactivated',
   'user.role_suspended': 'Account suspended',
   'document.generated': 'Document generated',
+  'document.draft_created': 'Document draft created',
+  'document.edited': 'Document edited',
+  'document.submitted_for_review': 'Document submitted for review',
   'document.sent_to_client': 'Document sent to client',
   'document.approved': 'Document approved',
   'document.rejected': 'Document rejected',
+  'sla.signature_verified': 'Signed SLA verified',
+  'client.agreement_confirmed': 'Client agreement confirmed',
+  'development.readiness_changed': 'Development readiness changed',
+  'development.gate_denied': 'Development access blocked',
   'project.created': 'Project created',
   'project.created_provisional': 'Provisional project created',
   'project.created_from_meeting': 'Project created from meeting',
   'project.developer_assigned': 'Developer assigned',
+  'project.development_started': 'Development started',
   'discovery_meeting.created': 'Discovery meeting recorded',
   'discovery_meeting.transcript_recorded': 'Transcript added',
   'discovery_meeting.transcript_processed': 'Transcript processed',
@@ -153,6 +161,11 @@ function money(cents: unknown) {
   } catch {
     return `${(amount / 100).toFixed(2)} ZAR`
   }
+}
+
+function formatAuditDate(value: string): string {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? 'the recorded date' : date.toLocaleDateString('en-ZA')
 }
 
 function role(value: unknown) {
@@ -257,7 +270,7 @@ export function describeAudit(row: AuditRow, lookups: AuditLookups): AuditDescri
   // UUIDs or internal event/column names into the UI.
   const clean = (value: string) => value
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, 'a record')
-    .replace(/\b(?:pts_[a-z_]+|(?:user|project|document|discovery_meeting)\.[a-z_]+)\b/gi, 'a record')
+    .replace(/\b(?:pts_[a-z_]+|(?:user|project|document|discovery_meeting|sla|client|development)\.[a-z_]+)\b/gi, 'a record')
 
   const base = (summary: string, subject: string, context: string[] = []): AuditDescription => ({
     activityType: activityLabelFor(row.action),
@@ -321,10 +334,47 @@ export function describeAudit(row: AuditRow, lookups: AuditLookups): AuditDescri
         title || 'a document',
       )
     }
+    case 'document.draft_created': {
+      const title = firstText(after, ['title'])
+      return base(`Created an editable draft${title ? ` for ${title}` : ''}.`, title || 'a document')
+    }
+    case 'document.edited': {
+      const title = firstText(after, ['title'])
+      return base(`Saved edits${title ? ` to ${title}` : ''} inside the portal.`, title || 'a document')
+    }
+    case 'document.submitted_for_review': {
+      const title = firstText(after, ['title'])
+      return base(`Submitted ${title || 'a document'} for senior review.`, title || 'a document')
+    }
     case 'document.approved':
     case 'document.rejected': {
       const label = documentLabel(row.entity_id, after, lookups)
       return base(`${row.action.endsWith('approved') ? 'Approved' : 'Rejected'} ${label}.`, label)
+    }
+    case 'sla.signature_verified': {
+      const project = projectLabel(row.entity_id, after, lookups)
+      const verifiedDate = firstText(after, ['verified_date'])
+      return base(
+        `Confirmed the client's signed SLA for ${project}${verifiedDate ? ` with a verified date of ${formatAuditDate(verifiedDate)}` : ''}.`,
+        project,
+      )
+    }
+    case 'client.agreement_confirmed': {
+      const project = projectLabel(row.entity_id, after, lookups)
+      return base(`Confirmed the client agreement for ${project}.`, project)
+    }
+    case 'development.readiness_changed': {
+      const project = projectLabel(row.entity_id, after, lookups)
+      const outcome = firstText(after, ['outcome']) === 'ready' ? 'ready' : 'locked'
+      return base(`Development readiness for ${project} changed to ${outcome}.`, project)
+    }
+    case 'development.gate_denied': {
+      const project = projectLabel(row.entity_id, after, lookups)
+      return base(`Blocked an attempt to begin development on ${project} before prerequisites were complete.`, project)
+    }
+    case 'project.development_started': {
+      const project = projectLabel(row.entity_id, after, lookups)
+      return base(`Started development on ${project}.`, project)
     }
     case 'project.created':
     case 'project.created_provisional': {

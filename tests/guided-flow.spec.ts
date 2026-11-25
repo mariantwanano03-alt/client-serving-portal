@@ -125,12 +125,26 @@ test('GUIDED FLOW: login → theme → audio → review → create → edit clie
   // ---------------------------------------------------------------- DOCUMENTS
   await page.getByRole('button', { name: 'Documents' }).click()
   const beforeDocs = await page.getByText(/Documents \(\d+\)/).innerText()
-  await page.getByRole('button', { name: 'Generate PRD' }).click()
-  await expect(page.getByText('PRD generated!')).toBeVisible({ timeout: 20000 })
-  const afterDocs = await page.getByText(/Documents \(\d+\)/).innerText()
-  console.log(`✅ STEP 7: document generated — ${beforeDocs} → ${afterDocs}`)
 
-  // Download the generated document as a real PDF.
+  await expect(page.getByTestId('generate-document-button')).toHaveCount(1)
+  await page.getByTestId('generate-document-button').click()
+  await expect(page.getByTestId('generate-modal')).toBeVisible()
+  await page.getByTestId('generate-type-Requirements').click()
+  await page.getByTestId('generate-continue').click()
+  await expect(page.getByTestId('generation-field-functional_requirements')).toBeVisible()
+  await page.getByTestId('generation-field-functional_requirements').fill('Track shipment status and generate invoices.')
+  await page.getByTestId('generation-field-non_functional_requirements').fill('The portal must load within three seconds and keep client records private.')
+  await page.getByTestId('generate-submit').click()
+
+  await expect(page.getByTestId('documents-message')).toContainText('created as a draft', { timeout: 20000 })
+  const countFrom = (value: string) => Number(value.match(/\d+/)?.[0] || '0')
+  const expectedCount = countFrom(beforeDocs) + 1
+  const documentsHeading = page.getByRole('heading', { name: /Documents \(\d+\)/ })
+  await expect(documentsHeading).toHaveText(new RegExp(`Documents \\(${expectedCount}\\)`), { timeout: 20000 })
+  const afterDocs = await documentsHeading.innerText()
+  console.log(`✅ STEP 7: requirements draft generated — ${beforeDocs} → ${afterDocs}`)
+
+  // Download the generated draft as a real PDF.
   const downloadPromise = page.waitForEvent('download')
   await page.getByRole('button', { name: 'Download' }).first().click()
   const download = await downloadPromise
@@ -173,10 +187,12 @@ test('GUIDED FLOW: login → theme → audio → review → create → edit clie
     .select('id, project_reference, clients(name)').eq('id', projectId).single()
   expect(pErr).toBeNull()
   expect(savedProject?.project_reference).toBe(reference)
-  expect((savedProject?.clients as any)?.name).toBe('Northwind Trading Ltd')
+  const savedClient = savedProject?.clients as { name?: string } | { name?: string }[] | null | undefined
+  const savedClientName = Array.isArray(savedClient) ? savedClient[0]?.name : savedClient?.name
+  expect(savedClientName).toBe('Northwind Trading Ltd')
 
   const { data: docs } = await admin.from('documents').select('id, type').eq('project_id', projectId)
-  expect((docs || []).some((d) => d.type === 'PRD')).toBeTruthy()
+  expect((docs || []).some((d) => d.type === 'Requirements')).toBeTruthy()
 
   // Every generated document revision must be based on real reviewed details.
   for (const doc of docs || []) {
@@ -194,7 +210,8 @@ test('GUIDED FLOW: login → theme → audio → review → create → edit clie
 
   const { data: profile } = await admin.from('profiles').select('theme_preference')
     .eq('full_name', 'Alex Rivers').maybeSingle()
-  console.log('   DB project:', savedProject?.project_reference, '| docs:', docs?.length, '| links:', types.join(', '), '| theme:', (profile as any)?.theme_preference)
+  const themePreference = (profile as { theme_preference?: string } | null)?.theme_preference
+  console.log('   DB project:', savedProject?.project_reference, '| docs:', docs?.length, '| links:', types.join(', '), '| theme:', themePreference)
   console.log('✅ STEP 9: backend/database verification passed')
   console.log(`\n🎉 FULL CLICKTHROUGH PASSED — evidence in ${SHOTS}`)
 })
