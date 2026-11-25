@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { writeAudit } from '@/lib/audit'
 import { createClient } from '@supabase/supabase-js'
 import { supabase } from '@/lib/supabase'
+import { denyBusinessOperation } from '@/lib/authz'
 
 function getAuthenticatedClient(req: NextRequest) {
   const authHeader = req.headers.get('authorization')
@@ -89,6 +91,8 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const denied = await denyBusinessOperation(req)
+  if (denied) return denied
   try {
     const { id } = await params
     const client = getAuthenticatedClient(req)
@@ -108,8 +112,8 @@ export async function POST(
       return NextResponse.json({ error: 'Could not load user profile.' }, { status: 401 })
     }
 
-    // Staff can process transcripts
-    if (!['senior_dev_pm', 'junior_developer', 'administrator'].includes(profile.role)) {
+    // Staff (never administrators) can process transcripts
+    if (!['senior_dev_pm', 'junior_developer'].includes(profile.role)) {
       return NextResponse.json({ error: 'Not authorized.' }, { status: 403 })
     }
 
@@ -161,8 +165,7 @@ export async function POST(
     }
 
     // Audit entry
-    await client.from('audit_entries').insert({
-      actor_user_id: user.id,
+    await writeAudit(client, {
       action: 'discovery_meeting.transcript_processed',
       entity_type: 'discovery_meeting',
       entity_id: id,

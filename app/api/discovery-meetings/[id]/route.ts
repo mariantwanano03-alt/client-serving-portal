@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { writeAudit } from '@/lib/audit'
 import { createClient } from '@supabase/supabase-js'
 import { supabase } from '@/lib/supabase'
+import { getSupabaseAdmin } from '@/lib/supabaseAdmin'
+import { denyBusinessOperation } from '@/lib/authz'
 
 // Helper: get an authenticated supabase client from the request
 function getAuthenticatedClient(req: NextRequest) {
@@ -21,6 +24,8 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const denied = await denyBusinessOperation(_req)
+  if (denied) return denied
   try {
     const { id } = await params
     const client = getAuthenticatedClient(_req)
@@ -46,9 +51,12 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const denied = await denyBusinessOperation(req)
+  if (denied) return denied
   try {
     const { id } = await params
     const client = getAuthenticatedClient(req)
+    const admin = getSupabaseAdmin()
     const body = await req.json()
 
     const { data: { user }, error: userError } = await client.auth.getUser()
@@ -77,7 +85,7 @@ export async function PATCH(
       return NextResponse.json({ error: 'Could not load user profile.' }, { status: 401 })
     }
 
-    const isSeniorOrAdmin = ['senior_dev_pm', 'administrator'].includes(profile.role)
+    const isSeniorOrAdmin = profile.role === 'senior_dev_pm'
 
     // ── Handle status change to 'approved' → auto-create client ──
     if (body.status === 'approved' && meeting.status !== 'approved') {
@@ -124,8 +132,7 @@ export async function PATCH(
             return NextResponse.json({ error: linkError.message }, { status: 500 })
           }
 
-          await client.from('audit_entries').insert({
-            actor_user_id: user.id,
+          await writeAudit(client, {
             action: 'discovery_meeting.approved_existing_client',
             entity_type: 'discovery_meeting',
             entity_id: id,
@@ -152,8 +159,7 @@ export async function PATCH(
           return NextResponse.json({ error: linkError.message }, { status: 500 })
         }
 
-        await client.from('audit_entries').insert({
-          actor_user_id: user.id,
+        await writeAudit(client, {
           action: 'discovery_meeting.approved_existing_client',
           entity_type: 'discovery_meeting',
           entity_id: id,
@@ -173,7 +179,7 @@ export async function PATCH(
         counter++
       }
 
-      const { data: newClient, error: clientError } = await client
+      const { error: clientError } = await client
         .from('clients')
         .insert({
           client_code: finalCode,
@@ -184,11 +190,23 @@ export async function PATCH(
           billing_details: null,
           created_by: user.id,
         })
-        .select()
-        .single()
 
       if (clientError) {
         return NextResponse.json({ error: 'Could not create client: ' + clientError.message }, { status: 500 })
+      }
+
+      // RETURNING would evaluate the scoped client SELECT policy before the
+      // new client has a project, so load it with the service-role client.
+      const { data: newClient, error: fetchClientError } = await admin
+        .from('clients')
+        .select('id, name, client_code')
+        .eq('client_code', finalCode)
+        .maybeSingle()
+      if (fetchClientError || !newClient) {
+        return NextResponse.json(
+          { error: fetchClientError?.message || 'Could not load the created client.' },
+          { status: 500 }
+        )
       }
 
       const { error: updateError } = await client
@@ -203,7 +221,7 @@ export async function PATCH(
 
       // ── Create provisional project associated with the new client ──
       const projectRef = `PRJ-${Date.now().toString(36).toUpperCase()}`
-      const { data: newProject, error: projError } = await client
+      const { error: projError } = await client
         .from('projects')
         .insert({
           project_reference: projectRef,
@@ -212,18 +230,12 @@ export async function PATCH(
           description: `Project created from Discovery Meeting ${meeting.id.slice(0, 8)}.`,
           stage: 'create_project',
           status: 'draft',
-          is_provisional: false,
-          client_creation_status: 'created',
-          discovery_meeting_id: id,
           created_by: user.id,
         })
-        .select()
-        .single()
 
       if (projError) {
         // Non-fatal: client was created, project association failed
-        await client.from('audit_entries').insert({
-          actor_user_id: user.id,
+        await writeAudit(client, {
           action: 'discovery_meeting.approved_client_created',
           entity_type: 'discovery_meeting',
           entity_id: id,
@@ -242,6 +254,21 @@ export async function PATCH(
           discoveryMeeting: { id, status: 'approved', client_id: newClient.id },
           projectError: projError.message,
         }, { status: 207 })
+      }
+
+      const { data: newProject, error: fetchProjectError } = await admin
+        .from('projects')
+        .select('id, project_reference')
+        .eq('project_reference', projectRef)
+        .eq('created_by', user.id)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      if (fetchProjectError || !newProject) {
+        return NextResponse.json(
+          { error: fetchProjectError?.message || 'Could not load the created project.' },
+          { status: 500 }
+        )
       }
 
       // Link project to discovery meeting
@@ -571,8 +598,7 @@ ${m.additional_notes || '—'}
         }, { onConflict: 'project_id' })
 
       // Record audit entry for document generation
-      await client.from('audit_entries').insert({
-        actor_user_id: user.id,
+      await writeAudit(client, {
         action: 'discovery_meeting.documents_generated',
         entity_type: 'discovery_meeting',
         entity_id: id,
@@ -610,8 +636,7 @@ ${m.additional_notes || '—'}
         return NextResponse.json({ error: updateError.message }, { status: 500 })
       }
 
-      await client.from('audit_entries').insert({
-        actor_user_id: user.id,
+      await writeAudit(client, {
         action: 'discovery_meeting.rejected',
         entity_type: 'discovery_meeting',
         entity_id: id,

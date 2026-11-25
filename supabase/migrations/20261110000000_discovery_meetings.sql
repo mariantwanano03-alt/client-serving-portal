@@ -59,11 +59,11 @@ create policy "Staff can view discovery meetings"
   to authenticated
   using (current_user_role() in ('senior_dev_pm', 'junior_developer', 'administrator'));
 
--- Staff can create discovery meetings
-create policy "Staff can create discovery meetings"
+-- Allow all authenticated users to create discovery meetings
+create policy "Allow authenticated insert discovery meetings"
   on discovery_meetings for insert
   to authenticated
-  with check (current_user_role() in ('senior_dev_pm', 'junior_developer', 'administrator'));
+  with check (true);
 
 -- Senior Dev / PM and Administrator can update discovery meetings (approve/reject)
 create policy "Senior can update discovery meetings"

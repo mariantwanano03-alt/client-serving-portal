@@ -1,461 +1,557 @@
 'use client'
 
-import React, { useEffect, useState, useMemo, useCallback } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
+import Link from 'next/link'
 import PortalShell, { usePortal, formatRole } from '@/components/PortalShell'
 import { supabase } from '@/lib/supabase'
 
-type Profile = {
+type Role = 'administrator' | 'senior_dev_pm' | 'junior_developer' | 'client'
+type AccountStatus = 'pending_role_assignment' | 'active' | 'suspended'
+type StatusFilter = 'all' | 'pending' | 'active' | 'suspended'
+
+type ManagedUser = {
   id: string
+  email: string | null
   full_name: string
-  role: 'administrator' | 'senior_dev_pm' | 'junior_developer'
+  role: Role
   is_active: boolean
-  created_at?: string
+  account_status: AccountStatus
+  created_at: string | null
 }
 
-type AuditEntry = {
-  id: string
-  actor_user_id: string | null
-  action: string
-  entity_type: string
-  entity_id: string | null
-  before_value: unknown
-  after_value: unknown
-  created_at: string
+type Confirmation = {
+  kind: 'role' | 'status' | 'assign'
+  user: ManagedUser
+  nextRole?: Role
+  nextStatus?: boolean
+  message: string
+}
+
+type StatusMessage = { type: 'success' | 'error'; text: string }
+
+const SUSPEND_MESSAGE =
+  "Are you sure you want to suspend this user's role? Their permissions associated with this role will be revoked."
+const REACTIVATE_MESSAGE = "Are you sure you want to reactivate this user's role?"
+
+const ROLE_OPTIONS: { value: Role; label: string }[] = [
+  { value: 'junior_developer', label: 'Junior Developer' },
+  { value: 'senior_dev_pm', label: 'Senior Developer / Project Manager' },
+  { value: 'client', label: 'Client' },
+  { value: 'administrator', label: 'Administrator' },
+]
+
+const FILTERS: { value: StatusFilter; label: string; testId: string }[] = [
+  { value: 'all', label: 'All users', testId: 'user-filter-all' },
+  { value: 'pending', label: 'Pending role assignment', testId: 'user-filter-pending' },
+  { value: 'active', label: 'Active', testId: 'user-filter-active' },
+  { value: 'suspended', label: 'Suspended', testId: 'user-filter-suspended' },
+]
+
+function formatRegistered(value: string | null) {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '—'
+  return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+function roleBadgeClass(role: Role) {
+  return `admin-badge role-${role}`
+}
+
+function statusLabel(status: AccountStatus) {
+  if (status === 'pending_role_assignment') return 'Pending Role Assignment'
+  return status === 'active' ? 'Active' : 'Suspended'
+}
+
+function statusBadgeClass(status: AccountStatus) {
+  return `admin-badge status-${status}`
 }
 
 export default function AdminPage() {
   return (
-    <PortalShell title="System Administration" breadcrumb="WORKSPACE / ADMIN">
+    <PortalShell title="User Management" breadcrumb="WORKSPACE / USER MANAGEMENT">
       <AdminContent />
     </PortalShell>
   )
 }
 
 function AdminContent() {
-  const { role, user } = usePortal()
-
-  const [activeTab, setActiveTab] = useState<'users' | 'audit'>('users')
-  const [profiles, setProfiles] = useState<Profile[]>([])
-  const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([])
+  const { user, isAdministrator, canManageUsers } = usePortal()
+  const [users, setUsers] = useState<ManagedUser[]>([])
+  const [search, setSearch] = useState('')
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [loading, setLoading] = useState(true)
-  const [searchUser, setSearchUser] = useState('')
-  const [auditFilter, setAuditFilter] = useState('all')
-  const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [submitting, setSubmitting] = useState(false)
-
-  const isAdmin = role === 'administrator'
-
-  const loadAdminData = useCallback(async () => {
-    setLoading(true)
-    try {
-      const { data: profs, error: profsErr } = await supabase
-        .from('profiles')
-        .select('id, full_name, role, is_active, created_at')
-        .order('created_at', { ascending: false })
-
-      if (profsErr) {
-        setStatusMessage({ type: 'error', text: 'Could not load users: ' + profsErr.message })
-      } else {
-        setProfiles((profs as Profile[]) ?? [])
-      }
-
-      const { data: audits, error: auditErr } = await supabase
-        .from('audit_entries')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(100)
-
-      if (!auditErr && audits) {
-        setAuditEntries(audits as AuditEntry[])
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Unknown error'
-      setStatusMessage({ type: 'error', text: msg })
-    }
-    setLoading(false)
-  }, [])
+  const [statusMessage, setStatusMessage] = useState<StatusMessage | null>(null)
+  const [confirmation, setConfirmation] = useState<Confirmation | null>(null)
+  const [assignmentRole, setAssignmentRole] = useState<Role>('junior_developer')
 
   useEffect(() => {
+    if (!canManageUsers) return
     let ignore = false
 
-    async function init() {
+    async function loadUsers() {
+      setLoading(true)
+      setStatusMessage(null)
       try {
-        const { data: profs, error: profsErr } = await supabase
-          .from('profiles')
-          .select('id, full_name, role, is_active, created_at')
-          .order('created_at', { ascending: false })
-
-        if (ignore) return
-
-        if (profsErr) {
-          setStatusMessage({ type: 'error', text: 'Could not load users: ' + profsErr.message })
-        } else {
-          setProfiles((profs as Profile[]) ?? [])
+        const { data } = await supabase.auth.getSession()
+        const token = data.session?.access_token
+        if (!token) {
+          setStatusMessage({ type: 'error', text: 'Your session has expired. Please sign in again.' })
+          return
         }
 
-        const { data: audits, error: auditErr } = await supabase
-          .from('audit_entries')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(100)
+        const response = await fetch('/api/admin/users', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
 
-        if (!ignore && !auditErr && audits) {
-          setAuditEntries(audits as AuditEntry[])
+        if (response.status === 401 || response.status === 403) {
+          setStatusMessage({ type: 'error', text: 'You are not authorized to manage users. Please sign in again.' })
+          return
         }
-        setLoading(false)
+
+        const json = await response.json()
+        if (!response.ok) throw new Error(json?.error || 'Could not load users.')
+        if (!ignore) setUsers((json.users ?? []) as ManagedUser[])
       } catch (err: unknown) {
         if (!ignore) {
-          const msg = err instanceof Error ? err.message : 'Unknown error'
-          setStatusMessage({ type: 'error', text: msg })
-          setLoading(false)
+          setStatusMessage({ type: 'error', text: err instanceof Error ? err.message : 'Could not load users.' })
         }
+      } finally {
+        if (!ignore) setLoading(false)
       }
     }
 
-    init()
+    loadUsers()
+    return () => { ignore = true }
+  }, [canManageUsers])
 
-    return () => {
-      ignore = true
-    }
-  }, [])
+  const activeAdminCount = useMemo(
+    () => users.filter((item) => (
+      item.is_active && item.account_status === 'active' && item.role === 'administrator'
+    )).length,
+    [users],
+  )
 
-  async function handleUpdateRole(userId: string, newRole: Profile['role'], currentRole: string) {
-    if (!isAdmin) {
-      setStatusMessage({ type: 'error', text: 'Only administrators can modify roles.' })
-      return
-    }
-
-    setSubmitting(true)
-    const { error } = await supabase.from('profiles').update({ role: newRole }).eq('id', userId)
-
-    if (error) {
-      setSubmitting(false)
-      setStatusMessage({ type: 'error', text: 'Failed to update role: ' + error.message })
-      return
-    }
-
-    // Record audit entry
-    await supabase.from('audit_entries').insert({
-      actor_user_id: user?.id,
-      action: 'user.role_changed',
-      entity_type: 'profile',
-      entity_id: userId,
-      before_value: { role: currentRole },
-      after_value: { role: newRole },
-    })
-
-    setSubmitting(false)
-    setStatusMessage({ type: 'success', text: `User role updated to ${formatRole(newRole)}.` })
-    await loadAdminData()
-  }
-
-  async function handleToggleUserStatus(userId: string, currentStatus: boolean) {
-    if (!isAdmin) return
-    const nextStatus = !currentStatus
-
-    setSubmitting(true)
-    const { error } = await supabase.from('profiles').update({ is_active: nextStatus }).eq('id', userId)
-
-    if (error) {
-      setSubmitting(false)
-      setStatusMessage({ type: 'error', text: 'Failed to update status: ' + error.message })
-      return
-    }
-
-    setSubmitting(false)
-    setStatusMessage({ type: 'success', text: `User marked as ${nextStatus ? 'active' : 'suspended'}.` })
-    await loadAdminData()
-  }
+  const pendingCount = useMemo(
+    () => users.filter((item) => item.account_status === 'pending_role_assignment').length,
+    [users],
+  )
 
   const filteredUsers = useMemo(() => {
-    if (!searchUser.trim()) return profiles
-    const q = searchUser.toLowerCase()
-    return profiles.filter((p) => p.full_name.toLowerCase().includes(q) || p.role.toLowerCase().includes(q))
-  }, [profiles, searchUser])
+    const q = search.trim().toLowerCase()
+    return users.filter((item) => {
+      const matchesFilter =
+        statusFilter === 'all' ||
+        (statusFilter === 'pending' && item.account_status === 'pending_role_assignment') ||
+        (statusFilter === 'active' && item.account_status === 'active') ||
+        (statusFilter === 'suspended' && item.account_status === 'suspended')
+      if (!matchesFilter) return false
+      if (!q) return true
+      return [item.full_name, item.email, formatRole(item.role), statusLabel(item.account_status)]
+        .some((value) => (value || '').toLowerCase().includes(q))
+    })
+  }, [users, search, statusFilter])
 
-  const filteredAudits = useMemo(() => {
-    if (auditFilter === 'all') return auditEntries
-    return auditEntries.filter((a) => a.entity_type === auditFilter)
-  }, [auditEntries, auditFilter])
+  function requestRoleChange(target: ManagedUser, nextRole: Role) {
+    if (nextRole === target.role) return
+    if (target.id === user?.id) {
+      setStatusMessage({ type: 'error', text: 'You cannot change your own role.' })
+      return
+    }
+    if (target.role === 'administrator' && target.is_active && activeAdminCount <= 1 && nextRole !== 'administrator') {
+      setStatusMessage({
+        type: 'error',
+        text: 'The last active administrator cannot be demoted. Promote another user first.',
+      })
+      return
+    }
+
+    setStatusMessage(null)
+    setConfirmation({
+      kind: 'role',
+      user: target,
+      nextRole,
+      message: `Change role from ${formatRole(target.role)} to ${formatRole(nextRole)}?`,
+    })
+  }
+
+  function requestAssignment(target: ManagedUser) {
+    if (target.id === user?.id) {
+      setStatusMessage({ type: 'error', text: 'You cannot change your own role.' })
+      return
+    }
+    if (target.account_status !== 'pending_role_assignment') return
+
+    setStatusMessage(null)
+    setAssignmentRole('junior_developer')
+    setConfirmation({
+      kind: 'assign',
+      user: target,
+      message: `Choose the confirmed role for ${target.full_name || target.email}. The account will become active once you confirm.`,
+    })
+  }
+
+  function requestStatusToggle(target: ManagedUser) {
+    if (target.id === user?.id) {
+      setStatusMessage({ type: 'error', text: 'You cannot change your own account status.' })
+      return
+    }
+    if (target.is_active && target.role === 'administrator' && activeAdminCount <= 1) {
+      setStatusMessage({
+        type: 'error',
+        text: 'The last active administrator cannot be suspended. Promote another user first.',
+      })
+      return
+    }
+
+    const nextStatus = !target.is_active
+    setStatusMessage(null)
+    setConfirmation({
+      kind: 'status',
+      user: target,
+      nextStatus,
+      message: nextStatus ? REACTIVATE_MESSAGE : SUSPEND_MESSAGE,
+    })
+  }
+
+  async function confirmAction() {
+    if (!confirmation || submitting) return
+
+    const target = confirmation.user
+    setSubmitting(true)
+    setStatusMessage(null)
+
+    try {
+      const { data } = await supabase.auth.getSession()
+      const token = data.session?.access_token
+      if (!token) throw new Error('Your session has expired. Please sign in again.')
+
+      const payload =
+        confirmation.kind === 'assign'
+          ? { role: assignmentRole }
+          : confirmation.kind === 'role'
+            ? { role: confirmation.nextRole }
+            : { account_status: confirmation.nextStatus ? 'active' : 'suspended' }
+
+      const response = await fetch(`/api/admin/users/${target.id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      })
+
+      if (response.status === 401 || response.status === 403) {
+        throw new Error('You are not authorized to manage users. Please sign in again.')
+      }
+
+      const json = await response.json()
+      if (!response.ok) throw new Error(json?.error || 'Could not update user.')
+
+      const updated = json.user as ManagedUser
+      setUsers((previous) => previous.map((item) => (item.id === updated.id ? updated : item)))
+      setConfirmation(null)
+
+      const label = updated.full_name || updated.email || 'User'
+      const text =
+        confirmation.kind === 'assign'
+          ? `Role assigned as ${formatRole(updated.role)}; ${label} is now active.`
+          : confirmation.kind === 'role'
+            ? `Role updated to ${formatRole(updated.role)} for ${label}.`
+            : `User ${updated.is_active ? 'reactivated' : 'suspended'}: ${label}.`
+      setStatusMessage({ type: 'success', text })
+    } catch (err: unknown) {
+      setStatusMessage({ type: 'error', text: err instanceof Error ? err.message : 'Could not update user.' })
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  if (!isAdministrator || !canManageUsers) {
+    return (
+      <div className="portal-card">
+        <div className="portal-empty-state">
+          <div className="portal-empty-icon">🔒</div>
+          <p className="portal-empty-title">Access Restricted</p>
+          <p className="portal-empty-desc">User management is available to active administrators only.</p>
+        </div>
+      </div>
+    )
+  }
 
   return (
-    <div style={{ maxWidth: 1100 }}>
-      {/* Notice for non-admins */}
-      {!isAdmin && (
-        <div className="auth-alert-error" style={{ marginBottom: 20 }}>
-          <span>ℹ️</span>
-          <div>
-            <strong>Administrator Access Notice:</strong> You are signed in as a{' '}
-            <strong>{formatRole(role)}</strong>. Role modifications and user governance are restricted to Administrators.
+    <div className="admin-design">
+      <div className="oversight-page">
+        <div className="readonly-banner">
+          <span aria-hidden="true">🛡️</span>
+          <span>
+            Administrative oversight only. Role and status changes are audited automatically
+            by the server; no business operations are available here.
+          </span>
+        </div>
+
+        {statusMessage && (
+          <div
+            className={statusMessage.type === 'error' ? 'auth-alert-error' : 'connection-status'}
+            data-testid={statusMessage.type === 'error' ? 'admin-error' : 'admin-success'}
+            role="alert"
+          >
+            <span aria-hidden="true">{statusMessage.type === 'error' ? '⚠️' : '✓'}</span>
+            <span>{statusMessage.text}</span>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* Notifications */}
-      {statusMessage && (
-        <div
-          className={statusMessage.type === 'error' ? 'auth-alert-error' : 'connection-status'}
-          style={{ marginBottom: 20 }}
-          role="alert"
-        >
-          <span>{statusMessage.type === 'error' ? '⚠️' : '✓'}</span>
-          <span>{statusMessage.text}</span>
-        </div>
-      )}
-
-      {/* Stats Row */}
-      <div className="portal-stats-row">
-        <div className="portal-stat-card">
-          <div className="portal-stat-icon home-tone">👥</div>
-          <div className="portal-stat-details">
-            <span className="portal-stat-label">Total Team Members</span>
-            <span className="portal-stat-value">{profiles.length}</span>
+        <section className="admin-metric-grid" aria-label="User summary">
+          <div className="admin-metric">
+            <span className="admin-metric-label">Total users</span>
+            <strong className="admin-metric-value">{users.length}</strong>
           </div>
-        </div>
-
-        <div className="portal-stat-card">
-          <div className="portal-stat-icon projects-tone">📜</div>
-          <div className="portal-stat-details">
-            <span className="portal-stat-label">System Audit Events</span>
-            <span className="portal-stat-value">{auditEntries.length}</span>
+          <div className="admin-metric">
+            <span className="admin-metric-label">Pending role assignment</span>
+            <strong className="admin-metric-value" data-testid="pending-user-count">{pendingCount}</strong>
           </div>
-        </div>
-
-        <div className="portal-stat-card">
-          <div className="portal-stat-icon clients-tone">🛡️</div>
-          <div className="portal-stat-details">
-            <span className="portal-stat-label">Admins</span>
-            <span className="portal-stat-value">
-              {profiles.filter((p) => p.role === 'administrator').length}
-            </span>
+          <div className="admin-metric">
+            <span className="admin-metric-label">Active users</span>
+            <strong className="admin-metric-value">
+              {users.filter((item) => item.account_status === 'active').length}
+            </strong>
           </div>
-        </div>
-      </div>
-
-      {/* Tabs */}
-      <div className="portal-tabs">
-        <button
-          type="button"
-          className={`portal-tab-btn ${activeTab === 'users' ? 'active' : ''}`}
-          onClick={() => setActiveTab('users')}
-        >
-          <span>👥 User & Role Governance</span>
-          <span className="portal-tab-count">{profiles.length}</span>
-        </button>
-        <button
-          type="button"
-          className={`portal-tab-btn ${activeTab === 'audit' ? 'active' : ''}`}
-          onClick={() => setActiveTab('audit')}
-        >
-          <span>📜 Audit Trail Stream</span>
-          <span className="portal-tab-count">{auditEntries.length}</span>
-        </button>
-      </div>
-
-      {loading && (
-        <div className="portal-card" style={{ marginBottom: 20 }}>
-          <div className="portal-empty-state">
-            <div className="portal-empty-icon">⏳</div>
-            <p className="portal-empty-title">Loading system records...</p>
+          <div className="admin-metric">
+            <span className="admin-metric-label">Administrators</span>
+            <strong className="admin-metric-value">{activeAdminCount}</strong>
           </div>
-        </div>
-      )}
+        </section>
 
-      {/* Tab 1: Users */}
-      {activeTab === 'users' && (
-        <div className="portal-card">
-          <div className="portal-card-header">
+        <section className="admin-surface">
+          <div className="admin-surface-head">
             <div>
-              <h3>Workspace Team Directory</h3>
-              <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>
-                Role assignment, user access statuses, and permission tiers.
+              <h2 className="admin-surface-title">User directory</h2>
+              <p className="admin-surface-desc">
+                Search users and manage roles or account status. Changes take effect immediately.
               </p>
             </div>
-            <div className="portal-search-wrap" style={{ maxWidth: 260 }}>
-              <span className="portal-search-icon">🔍</span>
+            <div className="portal-search-wrap admin-search">
+              <span className="portal-search-icon" aria-hidden="true">🔍</span>
               <input
                 className="portal-search-input"
-                placeholder="Search team member..."
-                value={searchUser}
-                onChange={(e) => setSearchUser(e.target.value)}
+                aria-label="Search users"
+                placeholder="Search name, email or role..."
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
               />
             </div>
           </div>
 
-          <div className="portal-table-container">
-            <table className="portal-table">
-              <thead>
-                <tr>
-                  <th>User</th>
-                  <th>Current Role</th>
-                  <th>Account Status</th>
-                  {isAdmin && <th style={{ textAlign: 'right' }}>Role Assignment</th>}
-                </tr>
-              </thead>
-              <tbody>
-                {filteredUsers.map((u) => {
-                  const initials = u.full_name
-                    ? u.full_name
-                        .split(' ')
-                        .map((n) => n[0])
-                        .join('')
-                        .slice(0, 2)
-                        .toUpperCase()
-                    : 'U'
-                  return (
-                    <tr key={u.id}>
-                      <td>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                          <div
-                            style={{
-                              width: 34,
-                              height: 34,
-                              borderRadius: 8,
-                              background: '#14213d',
-                              color: '#fff',
-                              display: 'grid',
-                              placeItems: 'center',
-                              fontSize: 13,
-                              fontWeight: 700,
-                            }}
-                          >
-                            {initials}
-                          </div>
-                          <div>
-                            <strong>{u.full_name}</strong>
-                            <p style={{ margin: 0, fontSize: 11, color: '#94a3b8' }}>ID: {u.id.slice(0, 8)}...</p>
-                          </div>
-                        </div>
-                      </td>
-                      <td>
-                        <span
-                          className={`portal-badge ${
-                            u.role === 'administrator'
-                              ? 'badge-purple'
-                              : u.role === 'senior_dev_pm'
-                              ? 'badge-blue'
-                              : 'badge-gray'
-                          }`}
-                        >
-                          {formatRole(u.role)}
-                        </span>
-                      </td>
-                      <td>
-                        <span className={`portal-badge ${u.is_active ? 'badge-green' : 'badge-amber'}`}>
-                          {u.is_active ? '● Active' : '○ Suspended'}
-                        </span>
-                      </td>
-                      {isAdmin && (
-                        <td style={{ textAlign: 'right' }}>
-                          <div style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
-                            <select
-                              className="form-input"
-                              style={{ width: 'auto', height: 32, fontSize: 12 }}
-                              value={u.role}
-                              onChange={(e) =>
-                                handleUpdateRole(u.id, e.target.value as Profile['role'], u.role)
-                              }
-                              disabled={submitting}
-                            >
-                              <option value="junior_developer">Junior Developer</option>
-                              <option value="senior_dev_pm">Senior Dev / PM</option>
-                              <option value="administrator">Administrator</option>
-                            </select>
-
-                            <button
-                              type="button"
-                              className="portal-btn-secondary"
-                              style={{ height: 32, padding: '0 8px', fontSize: 11 }}
-                              onClick={() => handleToggleUserStatus(u.id, u.is_active)}
-                              disabled={submitting}
-                            >
-                              {u.is_active ? 'Suspend' : 'Activate'}
-                            </button>
-                          </div>
-                        </td>
-                      )}
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+          <div className="admin-tabs" role="group" aria-label="Filter users by status">
+            {FILTERS.map((filter) => {
+              const count = filter.value === 'all'
+                ? users.length
+                : filter.value === 'pending'
+                  ? pendingCount
+                  : filter.value === 'active'
+                    ? users.filter((item) => item.account_status === 'active').length
+                    : users.filter((item) => item.account_status === 'suspended').length
+              return (
+                <button
+                  key={filter.value}
+                  type="button"
+                  className={`portal-tab-btn ${statusFilter === filter.value ? 'active' : ''}`}
+                  data-testid={filter.testId}
+                  aria-label={filter.label}
+                  aria-pressed={statusFilter === filter.value}
+                  onClick={() => setStatusFilter(filter.value)}
+                >
+                  {filter.label}
+                  <span className="admin-tab-count" aria-hidden="true">{count}</span>
+                </button>
+              )
+            })}
           </div>
-        </div>
-      )}
 
-      {/* Tab 2: Audit Trail Stream */}
-      {activeTab === 'audit' && (
-        <div className="portal-card">
-          <div className="portal-card-header">
-            <div>
-              <h3>System Event Audit Trail</h3>
-              <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>
-                Immutable log of user operations, permissions, stage changes, and financial records.
+          <div className="admin-notice">
+            <span aria-hidden="true">🛡️</span>
+            <span>
+              You cannot modify your own role or status, and the last active administrator cannot be
+              suspended or demoted. Every change is recorded in the{' '}
+              <Link href="/audit" className="portal-table-link">Audit Trail</Link>.
+            </span>
+          </div>
+
+          {loading ? (
+            <div className="portal-empty-state">
+              <div className="portal-empty-icon">⏳</div>
+              <p className="portal-empty-title">Loading users...</p>
+            </div>
+          ) : filteredUsers.length === 0 ? (
+            <div className="portal-empty-state">
+              <div className="portal-empty-icon">👥</div>
+              <p className="portal-empty-title">
+                {search
+                  ? 'No matching users'
+                  : statusFilter === 'pending'
+                    ? 'No users awaiting role assignment'
+                    : 'No users found'}
+              </p>
+              <p className="portal-empty-desc">
+                {search
+                  ? 'Try a different search term.'
+                  : statusFilter === 'pending'
+                    ? 'New registrations appear here until an Administrator confirms their role.'
+                    : 'User profiles will appear here once registered.'}
               </p>
             </div>
-            <select
-              className="form-input"
-              style={{ width: 'auto', height: 36, fontSize: 12 }}
-              value={auditFilter}
-              onChange={(e) => setAuditFilter(e.target.value)}
-            >
-              <option value="all">All Entities</option>
-              <option value="client">Clients</option>
-              <option value="project">Projects</option>
-              <option value="quotation">Quotations</option>
-              <option value="profile">Profiles / Users</option>
-            </select>
-          </div>
-
-          {filteredAudits.length === 0 ? (
-            <div className="portal-empty-state">
-              <div className="portal-empty-icon">📜</div>
-              <p className="portal-empty-title">No audit records found</p>
-            </div>
           ) : (
-            <div style={{ display: 'grid', gap: 10 }}>
-              {filteredAudits.map((entry) => (
-                <div key={entry.id} className="audit-entry-card">
-                  <div style={{ flex: 1 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
-                      <span className="audit-action-tag">{entry.action}</span>
-                      <span className="code-badge" style={{ fontSize: 10 }}>
-                        {entry.entity_type}
-                      </span>
-                      <span style={{ fontSize: 11, color: '#94a3b8' }}>
-                        {new Date(entry.created_at).toLocaleString()}
-                      </span>
-                    </div>
-
-                    <div style={{ fontSize: 12, color: '#475569', marginTop: 6 }}>
-                      {entry.after_value ? (
-                        <code
-                          style={{
-                            background: '#f8fafc',
-                            border: '1px solid #e2e8f0',
-                            padding: '4px 8px',
-                            borderRadius: 6,
-                            display: 'inline-block',
-                            fontFamily: 'monospace',
-                            fontSize: 11,
-                          }}
-                        >
-                          Payload: {JSON.stringify(entry.after_value)}
-                        </code>
-                      ) : (
-                        <span>Action performed</span>
-                      )}
-                    </div>
-                  </div>
-                  <div style={{ textAlign: 'right' }}>
-                    <span style={{ fontSize: 11, color: '#94a3b8' }}>
-                      Actor: {entry.actor_user_id ? entry.actor_user_id.slice(0, 8) + '...' : 'System'}
-                    </span>
-                  </div>
-                </div>
-              ))}
+            <div className="portal-table-container admin-table-scroll">
+              <table className="portal-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Email</th>
+                    <th>Registered</th>
+                    <th>Role</th>
+                    <th>Status</th>
+                    <th style={{ textAlign: 'right' }}>Controls</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredUsers.map((item) => {
+                    const isSelf = item.id === user?.id
+                    const isPending = item.account_status === 'pending_role_assignment'
+                    const isLastActiveAdmin = item.is_active && item.role === 'administrator' && activeAdminCount <= 1
+                    return (
+                      <tr
+                        key={item.id}
+                        data-testid="user-row"
+                        className={isPending ? 'user-row-pending' : undefined}
+                        data-status={item.account_status}
+                      >
+                        <td>
+                          <strong className="admin-cell-truncate is-name" title={item.full_name || 'Unnamed user'}>
+                            {item.full_name || 'Unnamed user'}
+                          </strong>
+                        </td>
+                        <td>
+                          <span className="admin-cell-truncate" title={item.email || ''}>{item.email || '—'}</span>
+                        </td>
+                        <td className="admin-registered-at">{formatRegistered(item.created_at)}</td>
+                        <td>
+                          <span className={roleBadgeClass(item.role)}>{formatRole(item.role)}</span>
+                        </td>
+                        <td>
+                          <span
+                            className={statusBadgeClass(item.account_status)}
+                            data-testid="user-status-badge"
+                          >
+                            {statusLabel(item.account_status)}
+                          </span>
+                        </td>
+                        <td>
+                          <div className="admin-row-actions">
+                            <select
+                              className="form-input"
+                              data-testid="user-role-select"
+                              aria-label={`Role for ${item.full_name || item.email}`}
+                              value={item.role}
+                              disabled={submitting || isSelf}
+                              onChange={(event) => requestRoleChange(item, event.target.value as Role)}
+                            >
+                              {ROLE_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>{option.label}</option>
+                              ))}
+                            </select>
+                            {isPending ? (
+                              <button
+                                type="button"
+                                className="portal-btn-primary"
+                                data-testid="assign-role-button"
+                                disabled={submitting || isSelf}
+                                aria-label={`Assign Role for ${item.full_name || item.email}`}
+                                onClick={() => requestAssignment(item)}
+                              >
+                                Assign Role
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                className="portal-btn-secondary"
+                                data-testid="user-status-toggle"
+                                disabled={submitting || isSelf || isLastActiveAdmin}
+                                aria-label={`${item.is_active ? 'Suspend' : 'Activate'} ${item.full_name || item.email}`}
+                                onClick={() => requestStatusToggle(item)}
+                              >
+                                {item.is_active ? 'Suspend' : 'Activate'}
+                              </button>
+                            )}
+                          </div>
+                          {isSelf && <small className="admin-row-note">Your own account cannot be modified.</small>}
+                          {!isSelf && isLastActiveAdmin && (
+                            <small className="admin-row-note">Last active administrator safeguard.</small>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
             </div>
           )}
+        </section>
+      </div>
+
+      {confirmation && (
+        <div className="confirm-backdrop" data-testid="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+          <div className="confirm-dialog">
+            <h3 id="confirm-title">
+              Confirm {confirmation.kind === 'assign'
+                ? 'role assignment'
+                : confirmation.kind === 'role' ? 'role change' : 'status change'}
+            </h3>
+            <p>{confirmation.message}</p>
+            {confirmation.kind === 'assign' && (
+              <label className="form-group">
+                <span className="form-label">Confirmed role</span>
+                <select
+                  className="form-input"
+                  data-testid="assign-role-select"
+                  aria-label="Role to assign"
+                  value={assignmentRole}
+                  disabled={submitting}
+                  onChange={(event) => setAssignmentRole(event.target.value as Role)}
+                >
+                  {ROLE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+                <small className="admin-row-note">
+                  This activates the account and applies the role&apos;s permissions on their next request.
+                </small>
+              </label>
+            )}
+            <div className="confirm-actions">
+              <button
+                type="button"
+                className="portal-btn-secondary"
+                data-testid="confirm-cancel"
+                disabled={submitting}
+                onClick={() => setConfirmation(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="portal-btn-primary"
+                data-testid="confirm-accept"
+                disabled={submitting}
+                onClick={confirmAction}
+              >
+                {submitting
+                  ? 'Saving…'
+                  : confirmation.kind === 'assign' ? 'Assign Role' : 'Confirm'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

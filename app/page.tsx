@@ -1,231 +1,223 @@
 'use client'
 
-import React, { useState, useCallback } from 'react'
-import { useRouter } from 'next/navigation'
+import React, { useEffect, useState } from 'react'
+import Link from 'next/link'
 import PortalShell, { usePortal } from '@/components/PortalShell'
 import { supabase } from '@/lib/supabase'
 
+type Shortcut = {
+  title: string
+  description: string
+  icon: string
+  href: string
+  tone: string
+  testId?: string
+}
+
+const ABOUT_SERVICES = [
+  'Bespoke software development',
+  'Web and mobile applications',
+  'ERP systems',
+  'AI automation',
+  'Cloud infrastructure',
+  'Data centre infrastructure management',
+  'Network infrastructure',
+  'Technical support',
+  'Staff augmentation',
+]
+
 export default function Home() {
-  const router = useRouter()
-  const { profile } = usePortal()
-  const userName = profile?.full_name?.trim() || 'User'
-
-  const [showForm, setShowForm] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
-
-  const [title, setTitle] = useState('')
-  const [notes, setNotes] = useState('')
-  const [audioFile, setAudioFile] = useState<File | null>(null)
-
-  const resetForm = useCallback(() => {
-    setTitle('')
-    setNotes('')
-    setAudioFile(null)
-  }, [])
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!title.trim()) {
-      setMessage({ type: 'error', text: 'Project title is required.' })
-      return
-    }
-
-    setLoading(true)
-    setMessage(null)
-
-    try {
-      // Optional audio upload (best-effort, non-fatal)
-      let audioStorageRef: string | null = null
-      if (audioFile) {
-        try {
-          const fileName = `meeting-${Date.now()}.${audioFile.name.split('.').pop() || 'webm'}`
-          const filePath = `home-uploads/${fileName}`
-          const { error: uploadError } = await supabase.storage
-            .from('meeting-transcripts')
-            .upload(filePath, audioFile, {
-              contentType: audioFile.type || 'audio/webm',
-              cacheControl: '3600',
-            })
-          if (!uploadError) {
-            const { data: { publicUrl } } = supabase.storage
-              .from('meeting-transcripts')
-              .getPublicUrl(filePath)
-            audioStorageRef = publicUrl
-          }
-        } catch {
-          // Non-fatal: continue without audio ref
-        }
-      }
-
-      // Step 1: Create discovery session
-      const meetingDate = new Date().toISOString().split('T')[0]
-      const startRes = await fetch('/api/discovery/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          meeting_date: meetingDate,
-          client_name: title.trim(),
-          primary_contact: userName,
-          additional_notes: notes.trim() || null,
-          audio_storage_ref: audioStorageRef || null,
-        }),
-      })
-
-      const startResult = await startRes.json()
-      if (!startRes.ok || !startResult?.data?.id) {
-        setMessage({ type: 'error', text: startResult?.error || 'Failed to create discovery session.' })
-        setLoading(false)
-        return
-      }
-
-      const sessionId = startResult.data.id
-
-      // Step 2: Immediately approve → creates client + project + documents
-      const approveRes = await fetch('/api/discovery/approve', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: sessionId }),
-      })
-
-      const approveResult = await approveRes.json()
-      if (!approveRes.ok || !approveResult?.project?.id) {
-        const errText = approveResult?.error || 'Failed to create project.'
-        setMessage({ type: 'error', text: `Failed to create project: ${errText}` })
-        setLoading(false)
-        return
-      }
-
-      // Reset form fields before redirecting
-      resetForm()
-      setMessage({ type: 'success', text: 'Project created!' })
-      setLoading(false)
-
-      // Redirect to the new project workspace
-      router.push(`/projects/${approveResult.project.id}`)
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'An unexpected error occurred.'
-      setMessage({ type: 'error', text: `Failed to create project: ${msg}` })
-      setLoading(false)
-    }
-  }
-
   return (
     <PortalShell title="Home" breadcrumb="WORKSPACE / HOME">
-      <div style={{ maxWidth: 560, margin: '0 auto', padding: '40px 24px', textAlign: 'center' }}>
-        {!showForm ? (
-          <>
-            <h1 style={{ fontSize: 32, fontWeight: 800, color: '#14213d', margin: '0 0 16px' }}>
-              Client Serving Portal
-            </h1>
-            <p style={{ fontSize: 15, color: '#64748b', margin: '0 0 32px', lineHeight: '1.6' }}>
-              Create your first project from a discovery meeting. The client record and project
-              workspace are generated immediately — no approval step required.
-            </p>
-            <button
-              type="button"
-              onClick={() => setShowForm(true)}
-              className="portal-btn-primary"
-              style={{ height: 52, padding: '0 32px', fontSize: 16, fontWeight: 700 }}
-              disabled={loading}
-            >
-              {loading ? 'Creating project...' : '+ Add New Project'}
-            </button>
-            {message && (
-              <div
-                style={{ marginTop: 16, padding: 12, borderRadius: 8, background: message.type === 'success' ? '#ecfdf5' : '#fef2f2', color: message.type === 'success' ? '#065f46' : '#b91c1c', fontSize: 13 }}
-              >
-                {message.text}
-              </div>
-            )}
-          </>
-        ) : (
-          <>
-            <button
-              type="button"
-              onClick={() => setShowForm(false)}
-              className="portal-back-btn"
-              style={{ marginBottom: 16, display: 'inline-flex', alignItems: 'center', gap: 6 }}
-            >
-              <span>←</span> Back
-            </button>
-            <h2 style={{ fontSize: 22, fontWeight: 700, color: '#14213d', margin: '0 0 8px' }}>New Project</h2>
-            <p style={{ color: '#64748b', margin: '0 0 24px', fontSize: 13 }}>
-              Enter the project title and any notes from your discovery conversation.
-            </p>
-            <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14, textAlign: 'left' }}>
-              <div className="form-group">
-                <label className="form-label">Project Title <span style={{ color: '#ef4444' }}>*</span></label>
-                <input
-                  className="form-input"
-                  placeholder="e.g. Acme Customer Portal"
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  disabled={loading}
-                  required
-                  autoFocus
-                />
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">Transcript / Notes</label>
-                <textarea
-                  className="form-input"
-                  style={{ minHeight: 120 }}
-                  placeholder="Key points from the discovery conversation..."
-                  value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
-                  disabled={loading}
-                />
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">Audio Upload <span style={{ color: '#94a3b8' }}>(Optional)</span></label>
-                <input
-                  type="file"
-                  className="form-input"
-                  accept="audio/*"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0] || null
-                    setAudioFile(file)
-                  }}
-                  disabled={loading}
-                />
-                {audioFile && (
-                  <p style={{ marginTop: 6, fontSize: 11, color: '#64748b' }}>
-                    {audioFile.name} ({Math.round(audioFile.size / 1024)} KB) — will be uploaded with the session.
-                  </p>
-                )}
-              </div>
-
-              <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 8 }}>
-                <button
-                  type="button"
-                  onClick={() => setShowForm(false)}
-                  className="portal-btn-secondary"
-                  disabled={loading}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="portal-btn-primary"
-                  disabled={loading}
-                >
-                  {loading ? 'Creating project...' : 'Create Project'}
-                </button>
-              </div>
-            </form>
-            {message && (
-              <div
-                style={{ marginTop: 16, padding: 12, borderRadius: 8, background: message.type === 'success' ? '#ecfdf5' : '#fef2f2', color: message.type === 'success' ? '#065f46' : '#b91c1c', fontSize: 13 }}
-              >
-                {message.text}
-              </div>
-            )}
-          </>
-        )}
-      </div>
+      <HomeContent />
     </PortalShell>
+  )
+}
+
+function shortcutsFor(role: string, isAdministrator: boolean): Shortcut[] {
+  if (isAdministrator) {
+    return [
+      { title: 'User Management', description: 'Review roles, statuses and pending account requests.', icon: '🛡', href: '/admin', tone: 'purple' },
+      { title: 'Client Records', description: 'Browse client records and their project associations.', icon: '♙', href: '/clients', tone: 'blue' },
+      { title: 'Projects', description: 'Review project workspaces and their read-only details.', icon: '▤', href: '/projects', tone: 'green' },
+      { title: 'Financial Records', description: 'Inspect deposits, payments and outstanding balances.', icon: '◈', href: '/financials', tone: 'amber' },
+      { title: 'Audit Trail', description: 'Follow recorded activity across the workspace.', icon: '📜', href: '/audit', tone: 'slate' },
+    ]
+  }
+
+  if (role === 'senior_dev_pm') {
+    return [
+      { title: 'Projects', description: 'Open project workspaces and manage delivery.', icon: '▤', href: '/projects', tone: 'purple' },
+      { title: 'Clients', description: 'Review client records and contact details.', icon: '♙', href: '/clients', tone: 'blue' },
+      { title: 'Discovery Meetings', description: 'Capture a meeting and review the extracted details.', icon: '🎙', href: '/create-project', tone: 'green' },
+      { title: 'Documents', description: 'Manage documents inside each project workspace.', icon: '📄', href: '/projects', tone: 'amber' },
+      { title: 'Messages', description: 'Read and reply to client conversations.', icon: '✉', href: '/messages', tone: 'slate' },
+    ]
+  }
+
+  if (role === 'junior_developer') {
+    return [
+      { title: 'My Assigned Projects', description: 'See the project work you have been assigned.', icon: '▤', href: '/projects', tone: 'purple' },
+      { title: 'Messages', description: 'Stay in sync with the team and clients.', icon: '✉', href: '/messages', tone: 'blue' },
+      { title: 'Documents', description: 'Find the documents relevant to your work.', icon: '📄', href: '/projects', tone: 'green' },
+      { title: 'Financial Records', description: 'Review payment progress on your projects.', icon: '◈', href: '/financials', tone: 'amber' },
+    ]
+  }
+
+  if (role === 'client') {
+    return [
+      { title: 'Messages', description: 'Communicate with your X Spark delivery team.', icon: '✉', href: '/messages', tone: 'purple' },
+      { title: 'Settings', description: 'Manage your account preferences and password.', icon: '⚙', href: '/settings', tone: 'blue' },
+    ]
+  }
+
+  return [
+    { title: 'Projects', description: 'Open your project workspace.', icon: '▤', href: '/projects', tone: 'purple' },
+    { title: 'Messages', description: 'Read and reply to messages.', icon: '✉', href: '/messages', tone: 'blue' },
+  ]
+}
+
+function HomeContent() {
+  const { profile, isAdministrator, role } = usePortal()
+  const userName = profile?.full_name?.trim() || 'User'
+  const [projectCount, setProjectCount] = useState<number | null>(null)
+  const shortcuts = shortcutsFor(role || '', isAdministrator)
+
+  useEffect(() => {
+    if (isAdministrator || role === 'client') return
+    let ignore = false
+    supabase.from('projects').select('id', { count: 'exact', head: true }).then(({ count }) => {
+      if (!ignore) setProjectCount(count ?? 0)
+    })
+    return () => { ignore = true }
+  }, [isAdministrator, role])
+
+  return (
+    <div className="home-page" data-testid="home-page">
+      {isAdministrator && (
+        <div className="readonly-banner" data-testid="admin-readonly-banner">
+          <span aria-hidden="true">🛡️</span>
+          <span>
+            Read-only oversight access. You can review records and audit activity, but
+            cannot perform business operations.
+          </span>
+        </div>
+      )}
+
+      <section className="home-hero" data-testid="home-branding">
+        <div className="home-hero-content">
+          <span className="dashboard-pill">
+            {isAdministrator ? 'ADMINISTRATOR OVERSIGHT' : 'X SPARK WORKSPACE'}
+          </span>
+          <h1>Welcome to your workspace</h1>
+          <p>
+            Hello {userName}. Manage projects, clients and business operations in one place,
+            or open a shortcut below to pick up where you left off.
+          </p>
+          <div className="home-hero-actions">
+            {isAdministrator ? (
+              <Link href="/dashboard" className="portal-btn-primary">
+                Open oversight dashboard <span aria-hidden="true">→</span>
+              </Link>
+            ) : role === 'client' ? (
+              <Link href="/messages" className="portal-btn-primary">
+                Open Messages <span aria-hidden="true">→</span>
+              </Link>
+            ) : (
+              <Link href="/create-project" className="portal-btn-primary" data-testid="add-new-project">
+                + Add New Project
+              </Link>
+            )}
+            <Link
+              href={isAdministrator || role === 'client' ? '/settings' : '/messages'}
+              className="portal-btn-secondary"
+            >
+              {isAdministrator || role === 'client' ? 'Open Settings' : 'Open Messages'}
+            </Link>
+          </div>
+        </div>
+        <div className="home-hero-mark" aria-hidden="true">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/xspark-logo-on-light.png" alt="" className="home-hero-logo" />
+          <div className="home-hero-mark-card">
+            <span>⌂</span>
+            <div />
+            <div />
+            <b>✓</b>
+          </div>
+        </div>
+      </section>
+
+      <section className="home-section" data-testid="workspace-shortcuts">
+        <div className="dashboard-section-heading">
+          <div>
+            <h2>Your Workspace</h2>
+            <p>Quick access to the areas available to your role.</p>
+          </div>
+          <span className="dashboard-role-badge" data-testid="home-role-label">
+            {isAdministrator ? 'Administrator' : role === 'senior_dev_pm' ? 'Senior Dev / PM' : role === 'junior_developer' ? 'Junior Developer' : role === 'client' ? 'Client' : 'Team Member'}
+          </span>
+        </div>
+
+        <div className="home-shortcut-grid">
+          {shortcuts.map((shortcut) => (
+            <Link
+              key={shortcut.title}
+              href={shortcut.href}
+              className={`home-shortcut-card ${shortcut.tone}`}
+              data-testid={shortcut.testId ? shortcut.testId : undefined}
+            >
+              <span className="home-shortcut-icon" aria-hidden="true">{shortcut.icon}</span>
+              <h3>{shortcut.title}</h3>
+              <p>{shortcut.description}</p>
+              <span className="dashboard-card-action">Open →</span>
+            </Link>
+          ))}
+        </div>
+
+        {projectCount !== null && !isAdministrator && (
+          <p className="home-project-count">
+            {projectCount} project{projectCount === 1 ? '' : 's'} currently in the workspace.
+          </p>
+        )}
+      </section>
+
+      <section className="home-about" data-testid="home-about">
+        <div className="home-about-head">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/xspark-logo-on-light.png" alt="X Spark" className="home-about-logo" />
+          <div>
+            <h2>About X Spark</h2>
+            <p>
+              X Spark is a software development and IT infrastructure company providing
+              technology solutions across software development, business systems, cloud
+              infrastructure and IT services.
+            </p>
+          </div>
+        </div>
+        <dl className="home-about-facts">
+          <div><dt>Company</dt><dd>X Spark</dd></div>
+          <div><dt>Industry</dt><dd>Software Development and IT Infrastructure</dd></div>
+          <div><dt>Established</dt><dd>2007</dd></div>
+          <div><dt>Location</dt><dd>Randjespark, Midrand, South Africa</dd></div>
+          <div>
+            <dt>Website</dt>
+            <dd>
+              <a href="https://www.xspark.co.za/" target="_blank" rel="noreferrer">
+                www.xspark.co.za
+              </a>
+            </dd>
+          </div>
+        </dl>
+        <div className="home-about-services">
+          <h3>Services</h3>
+          <ul>
+            {ABOUT_SERVICES.map((service) => (
+              <li key={service}>{service}</li>
+            ))}
+          </ul>
+        </div>
+      </section>
+    </div>
   )
 }

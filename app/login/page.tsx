@@ -22,19 +22,16 @@ export default function LoginPage() {
     setLoading(true)
     setErrorMessage('')
 
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
     try {
-      // 7-second timeout to prevent indefinite hangs if the local backend is offline
-      const timeoutPromise = new Promise<{ error: { message: string } }>((_, reject) =>
-        setTimeout(
-          () =>
-            reject(
-              new Error(
-                'Connection timed out. Could not reach Supabase backend. Please ensure your Supabase instance is running.'
-              )
-            ),
-          7000
+      // Generous timeout: cloud auth can be slow under load. The old 7s limit
+      // produced a misleading "backend offline" error during normal use.
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new Error('Sign-in timed out. Check your connection and try again.')),
+          20000
         )
-      )
+      })
 
       const authPromise = supabase.auth.signInWithPassword({
         email: email.trim(),
@@ -51,12 +48,13 @@ export default function LoginPage() {
         return
       }
 
-      router.push('/dashboard')
+      router.push('/')
     } catch (err: unknown) {
       const msg =
         err instanceof Error ? err.message : 'An unexpected error occurred during sign-in.'
       setErrorMessage(msg)
     } finally {
+      if (timeoutId) clearTimeout(timeoutId)
       // ALWAYS unlock loading state so the button and form are immediately usable
       setLoading(false)
     }
@@ -66,9 +64,10 @@ export default function LoginPage() {
     <main className="auth-container">
       <div className="auth-card">
         <div className="auth-brand">
-          <div className="auth-brand-icon">C</div>
-          <span className="auth-brand-name">ClientFlow</span>
-          <span className="auth-brand-tagline">Client Serving Portal</span>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img className="auth-brand-logo" src="/xspark-logo-on-light.png" alt="X Spark" />
+          <span className="auth-brand-name">Client Serving Portal</span>
+          <span className="auth-brand-tagline">by X Spark</span>
         </div>
 
         <div className="auth-heading">
@@ -133,12 +132,19 @@ export default function LoginPage() {
           </button>
         </form>
 
+        <div className="auth-signup-prompt">
+          <span>Don&apos;t have an account? </span>
+          <Link href="/signup" data-testid="signup-link">
+            Sign up
+          </Link>
+        </div>
+
         <div className="auth-footer">
           <Link href="/">
             <span>←</span> Back to overview
           </Link>
           <span className="auth-security-note">
-            Protected workspace · ClientFlow v1.0
+            Protected workspace · Client Serving Portal for X Spark
           </span>
         </div>
       </div>

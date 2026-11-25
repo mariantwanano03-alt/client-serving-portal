@@ -7,14 +7,16 @@ type LinkRecord = {
   id: string
   link_type: string | null
   url: string
-  created_at?: string | null
+  recorded_at?: string | null
+  verified?: boolean | null
 }
 
 type UrlLinksTabProps = {
   projectId: string
+  readOnly?: boolean
 }
 
-export default function UrlLinksTab({ projectId }: UrlLinksTabProps) {
+export default function UrlLinksTab({ projectId, readOnly = false }: UrlLinksTabProps) {
   const [links, setLinks] = useState<LinkRecord[]>([])
   const [loading, setLoading] = useState(false)
   const [adding, setAdding] = useState(false)
@@ -24,14 +26,18 @@ export default function UrlLinksTab({ projectId }: UrlLinksTabProps) {
   const [url, setUrl] = useState('')
 
   const loadLinks = useCallback(async () => {
+    // NOTE: this table uses `recorded_at`, not `created_at`. Querying the wrong
+    // column silently failed and left the list empty after a successful insert.
     const { data, error } = await supabase
       .from('development_links')
-      .select('id, link_type, url, created_at')
+      .select('id, link_type, url, recorded_at, verified')
       .eq('project_id', projectId)
-      .order('created_at', { ascending: false })
-    if (!error && data) {
-      setLinks(data as LinkRecord[])
+      .order('recorded_at', { ascending: false })
+    if (error) {
+      setMessage({ type: 'error', text: 'Could not load links: ' + error.message })
+      return
     }
+    setLinks((data as LinkRecord[]) || [])
   }, [projectId])
 
   useEffect(() => {
@@ -40,18 +46,33 @@ export default function UrlLinksTab({ projectId }: UrlLinksTabProps) {
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (readOnly) return
     if (!url.trim() || !label.trim()) {
       setMessage({ type: 'error', text: 'URL and label are required.' })
+      return
+    }
+
+    // Validate before saving: only absolute http(s) URLs are useful here.
+    try {
+      const parsed = new URL(url.trim())
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        setMessage({ type: 'error', text: 'URL must start with http:// or https://.' })
+        return
+      }
+    } catch {
+      setMessage({ type: 'error', text: 'Enter a valid URL, for example https://github.com/org/repo.' })
       return
     }
 
     setAdding(true)
     setMessage(null)
 
+    const { data: userData } = await supabase.auth.getUser()
     const { error } = await supabase.from('development_links').insert({
       project_id: projectId,
       link_type: label.trim(),
       url: url.trim(),
+      recorded_by: userData?.user?.id ?? null,
     })
 
     setAdding(false)
@@ -67,7 +88,7 @@ export default function UrlLinksTab({ projectId }: UrlLinksTabProps) {
   }
 
   const handleDelete = async (linkId: string) => {
-    if (!window.confirm('Delete this link?')) return
+    if (readOnly || !window.confirm('Delete this link?')) return
 
     const { error } = await supabase.from('development_links').delete().eq('id', linkId)
     if (error) {
@@ -81,66 +102,72 @@ export default function UrlLinksTab({ projectId }: UrlLinksTabProps) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <form onSubmit={handleAdd} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '16px' }}>
-        <div className="form-group">
-          <label className="form-label">Label</label>
-          <input className="form-input" placeholder="e.g. Repository" value={label} onChange={(e) => setLabel(e.target.value)} disabled={adding} />
-        </div>
-        <div className="form-group">
-          <label className="form-label">URL</label>
-          <input className="form-input" placeholder="https://..." value={url} onChange={(e) => setUrl(e.target.value)} disabled={adding} />
-        </div>
-        <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: '6px' }}>
-          <button type="button" onClick={() => { setLabel(''); setUrl('') }} className="portal-btn-secondary" disabled={adding}>
-            Clear
-          </button>
-          <button type="submit" className="portal-btn-primary" disabled={adding}>
-            {adding ? 'Adding…' : 'Save Link'}
-          </button>
-        </div>
-      </form>
+      {!readOnly && (
+        <form onSubmit={handleAdd} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, background: 'var(--surface-alt)', border: '1px solid var(--border-strong)', borderRadius: '10px', padding: '16px' }}>
+          <div className="form-group">
+            <label className="form-label" htmlFor="link-label">Label</label>
+            <input id="link-label" data-testid="link-label" className="form-input" placeholder="e.g. Repository" value={label} onChange={(e) => setLabel(e.target.value)} disabled={adding} />
+          </div>
+          <div className="form-group">
+            <label className="form-label" htmlFor="link-url">URL</label>
+            <input id="link-url" data-testid="link-url" type="url" className="form-input" placeholder="https://..." value={url} onChange={(e) => setUrl(e.target.value)} disabled={adding} />
+          </div>
+          <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: '6px' }}>
+            <button type="button" onClick={() => { setLabel(''); setUrl('') }} className="portal-btn-secondary" disabled={adding}>
+              Clear
+            </button>
+            <button type="submit" className="portal-btn-primary" disabled={adding}>
+              {adding ? 'Adding…' : 'Save Link'}
+            </button>
+          </div>
+        </form>
+      )}
 
       {message && (
         <div
-          style={{ padding: '10px', borderRadius: '8px', background: message.type === 'success' ? '#ecfdf5' : '#fef2f2', border: `1px solid ${message.type === 'success' ? '#a7f3d0' : '#fee2e2'}`, color: message.type === 'success' ? '#065f46' : '#b91c1c', fontSize: '13px' }}
+          style={{ padding: '10px', borderRadius: '8px', background: message.type === 'success' ? 'var(--success-bg)' : 'var(--error-bg)', border: `1px solid ${message.type === 'success' ? 'var(--success-border)' : 'var(--error-border)'}`, color: message.type === 'success' ? 'var(--success-text)' : 'var(--error-text)', fontSize: '13px' }}
         >
           {message.text}
         </div>
       )}
 
-      <h3 style={{ margin: '4px 0 0', fontSize: '15px', fontWeight: 700, color: '#14213d' }}>URL Links ({links.length})</h3>
+      <h3 style={{ margin: '4px 0 0', fontSize: '15px', fontWeight: 700, color: 'var(--heading)' }}>URL Links ({links.length})</h3>
 
       {links.length === 0 ? (
-        <div style={{ color: '#94a3b8', fontSize: '13px', paddingTop: '8px' }}>
-          No links yet. Add one above.
+        <div style={{ color: 'var(--muted-light)', fontSize: '13px', paddingTop: '8px' }}>
+          {readOnly ? 'No links recorded for this project.' : 'No links yet. Add one above.'}
         </div>
       ) : (
-        <div style={{ border: '1px solid #e8ecf3', borderRadius: '10px', overflow: 'hidden' }}>
+        <div style={{ border: '1px solid var(--border)', borderRadius: '10px', overflow: 'hidden' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', textAlign: 'left' }}>
             <thead>
               <tr>
-                <th style={{ padding: '12px 16px', background: '#f8fafc', color: '#64748b', fontWeight: 600, fontSize: '11px', textTransform: 'uppercase', borderBottom: '1px solid #e8ecf3' }}>Label</th>
-                <th style={{ padding: '12px 16px', background: '#f8fafc', color: '#64748b', fontWeight: 600, fontSize: '11px', textTransform: 'uppercase', borderBottom: '1px solid #e8ecf3' }}>URL</th>
-                <th style={{ padding: '12px 16px', background: '#f8fafc', color: '#64748b', fontWeight: 600, fontSize: '11px', textTransform: 'uppercase', borderBottom: '1px solid #e8ecf3' }}>Action</th>
+                <th style={{ padding: '12px 16px', background: 'var(--surface-alt)', color: 'var(--muted)', fontWeight: 600, fontSize: '11px', textTransform: 'uppercase', borderBottom: '1px solid var(--border)' }}>Label</th>
+                <th style={{ padding: '12px 16px', background: 'var(--surface-alt)', color: 'var(--muted)', fontWeight: 600, fontSize: '11px', textTransform: 'uppercase', borderBottom: '1px solid var(--border)' }}>URL</th>
+                {!readOnly && (
+                  <th style={{ padding: '12px 16px', background: 'var(--surface-alt)', color: 'var(--muted)', fontWeight: 600, fontSize: '11px', textTransform: 'uppercase', borderBottom: '1px solid var(--border)' }}>Action</th>
+                )}
               </tr>
             </thead>
             <tbody>
               {links.map((link) => (
-                <tr key={link.id} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                  <td style={{ padding: '12px 16px', color: '#1e293b' }}>{link.link_type || '—'}</td>
-                  <td style={{ padding: '12px 16px', color: '#1e293b' }}>
-                    <a href={link.url} target="_blank" rel="noopener noreferrer" style={{ color: '#4361ee', fontWeight: 600 }}>{link.url}</a>
+                <tr key={link.id} style={{ borderBottom: '1px solid var(--border-soft)' }}>
+                  <td style={{ padding: '12px 16px', color: 'var(--text)' }}>{link.link_type || '—'}</td>
+                  <td style={{ padding: '12px 16px', color: 'var(--text)' }}>
+                    <a href={link.url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', fontWeight: 600 }}>{link.url}</a>
                   </td>
-                  <td style={{ padding: '12px 16px' }}>
-                    <button
-                      type="button"
-                      onClick={() => handleDelete(link.id)}
-                      className="portal-danger-btn"
-                      style={{ fontSize: '11px', padding: '4px 10px' }}
-                    >
-                      Delete
-                    </button>
-                  </td>
+                  {!readOnly && (
+                    <td style={{ padding: '12px 16px' }}>
+                      <button
+                        type="button"
+                        onClick={() => handleDelete(link.id)}
+                        className="portal-danger-btn"
+                        style={{ fontSize: '11px', padding: '4px 10px' }}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>

@@ -1,31 +1,48 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { writeAudit } from '@/lib/audit'
 import { createClient } from '@supabase/supabase-js'
-import { supabase } from '@/lib/supabase'
+import { getSupabaseAdmin } from '@/lib/supabaseAdmin'
+import { denyBusinessOperation } from '@/lib/authz'
 
-function getAuthenticatedClient(req: NextRequest) {
-  const authHeader = req.headers.get('authorization')
-  if (authHeader?.startsWith('Bearer ')) {
-    const token = authHeader.slice(7)
-    return createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!,
-      { global: { headers: { Authorization: `Bearer ${token}` } } }
-    )
-  }
-  return supabase
-}
-
-// TODO: Approval removed - all users can generate directly
 // ─── POST /api/discovery/approve ─────────────────────────────────────────
 // Approve a discovery meeting → auto-create client + project + documents.
-// No role check: any authenticated user can trigger generation immediately.
-export async function POST(req: NextRequest) {
+// Approval creates clients, projects and documents, so it is senior-only.
+export async function POST(req: Request) {
+  const denied = await denyBusinessOperation(req)
+  if (denied) return denied
   try {
-    const client = getAuthenticatedClient(req)
+    // 1. Get token from Authorization header
+    const authHeader = req.headers.get('Authorization')
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return NextResponse.json({ error: 'Missing or invalid Authorization header' }, { status: 401 })
+    }
 
-    const { data: { user }, error: userError } = await client.auth.getUser()
+    const token = authHeader.replace('Bearer ', '')
+
+    // 2. Create a standard Supabase client with the user's token
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+      { global: { headers: { Authorization: `Bearer ${token}` } } }
+    )
+    const admin = getSupabaseAdmin()
+
+    // 3. Verify the user
+    const { data: { user }, error: userError } = await supabase.auth.getUser(token)
     if (userError || !user) {
       return NextResponse.json({ error: 'Not authenticated.' }, { status: 401 })
+    }
+
+    const { data: approverProfile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single()
+    if (approverProfile?.role !== 'senior_dev_pm') {
+      return NextResponse.json(
+        { error: 'Only Senior Developers / PMs can approve discovery meetings.' },
+        { status: 403 }
+      )
     }
 
     const body = await req.json()
@@ -35,7 +52,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Meeting id is required.' }, { status: 400 })
     }
 
-    const { data: meeting, error: meetingError } = await client
+    const { data: meeting, error: meetingError } = await supabase
       .from('discovery_meetings')
       .select('*')
       .eq('id', meetingId)
@@ -47,7 +64,7 @@ export async function POST(req: NextRequest) {
 
     if (meeting.status === 'approved' && meeting.client_id) {
       // Idempotent: already approved. Return existing client/project.
-      const { data: existingProject } = await client
+      const { data: existingProject } = await supabase
         .from('projects')
         .select('id, project_reference, client_id')
         .eq('client_id', meeting.client_id)
@@ -64,7 +81,7 @@ export async function POST(req: NextRequest) {
     const missing: string[] = []
     if (!meeting.client_name?.trim()) missing.push('Client/company name')
     if (!meeting.primary_contact?.trim()) missing.push('Primary contact person')
-    if (!meeting.contact_email?.trim()) missing.push('Contact email')
+    // contact_email is optional for approval; if missing, we'll create client by name
     if (missing.length > 0) {
       return NextResponse.json(
         { error: 'Cannot approve: required client information is missing.', missing },
@@ -78,7 +95,7 @@ export async function POST(req: NextRequest) {
     let clientName: string | null = null
 
     if (meeting.contact_email) {
-      const { data: existing } = await client
+      const { data: existing } = await supabase
         .from('clients')
         .select('id, name, client_code')
         .eq('email', meeting.contact_email)
@@ -90,7 +107,7 @@ export async function POST(req: NextRequest) {
       }
     }
     if (!clientId) {
-      const { data: existingByName } = await client
+      const { data: existingByName } = await supabase
         .from('clients')
         .select('id, name, client_code, email')
         .ilike('name', meeting.client_name.trim())
@@ -108,13 +125,13 @@ export async function POST(req: NextRequest) {
       let finalCode = baseCode
       let counter = 1
       while (true) {
-        const { data: codeCheck } = await client.from('clients').select('id').eq('client_code', finalCode).maybeSingle()
+        const { data: codeCheck } = await supabase.from('clients').select('id').eq('client_code', finalCode).maybeSingle()
         if (!codeCheck) break
         finalCode = `${baseCode}${counter}`
         counter++
       }
 
-      const { data: newClient, error: clientError } = await client
+      const { error: clientError } = await supabase
         .from('clients')
         .insert({
           client_code: finalCode,
@@ -125,11 +142,23 @@ export async function POST(req: NextRequest) {
           billing_details: null,
           created_by: user.id,
         })
-        .select()
-        .single()
 
       if (clientError) {
         return NextResponse.json({ error: 'Could not create client: ' + clientError.message }, { status: 500 })
+      }
+
+      // RETURNING would apply the scoped SELECT policy before the new client
+      // belongs to a project, so read the committed row with the service role.
+      const { data: newClient, error: fetchClientError } = await admin
+        .from('clients')
+        .select('id, client_code, name')
+        .eq('client_code', finalCode)
+        .maybeSingle()
+      if (fetchClientError || !newClient) {
+        return NextResponse.json(
+          { error: fetchClientError?.message || 'Could not load the created client.' },
+          { status: 500 }
+        )
       }
 
       clientId = newClient.id
@@ -138,7 +167,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ── Update meeting ──
-    const { error: updateError } = await client
+    const { error: updateError } = await supabase
       .from('discovery_meetings')
       .update({ status: 'approved', client_id: clientId, updated_at: new Date().toISOString() })
       .eq('id', meetingId)
@@ -147,8 +176,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: updateError.message }, { status: 500 })
     }
 
-    await client.from('audit_entries').insert({
-      actor_user_id: user.id,
+    await writeAudit(supabase, {
       action: 'discovery_meeting.approved',
       entity_type: 'discovery_meeting',
       entity_id: meetingId,
@@ -157,7 +185,7 @@ export async function POST(req: NextRequest) {
 
     // ── Create project ──
     const projectRef = `PRJ-${Date.now().toString(36).toUpperCase()}`
-    const { data: newProject, error: projError } = await client
+    const { error: projError } = await supabase
       .from('projects')
       .insert({
         project_reference: projectRef,
@@ -166,18 +194,12 @@ export async function POST(req: NextRequest) {
         description: `Project created from Discovery Meeting ${meetingId.slice(0, 8)}.`,
         stage: 'create_project',
         status: 'draft',
-        is_provisional: false,
-        client_creation_status: 'created',
-        discovery_meeting_id: meetingId,
         created_by: user.id,
       })
-      .select()
-      .single()
 
     if (projError) {
       // Non-fatal: client created, project failed
-      await client.from('audit_entries').insert({
-        actor_user_id: user.id,
+      await writeAudit(supabase, {
         action: 'discovery_meeting.approved_client_created',
         entity_type: 'discovery_meeting',
         entity_id: meetingId,
@@ -193,12 +215,27 @@ export async function POST(req: NextRequest) {
       }, { status: 207 })
     }
 
+    const { data: newProject, error: fetchProjectError } = await admin
+      .from('projects')
+      .select('id, project_reference, client_id')
+      .eq('project_reference', projectRef)
+      .eq('created_by', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (fetchProjectError || !newProject) {
+      return NextResponse.json(
+        { error: fetchProjectError?.message || 'Could not load the created project.' },
+        { status: 500 }
+      )
+    }
+
     // ── Automatic document generation (PRD, SRS, Handover) ──
     const docGenerationResults: Record<string, { success: boolean; error?: string }> = {}
 
     const generateDocument = async (docType: string, title: string, content: string) => {
       try {
-        const { data: docData, error: docErr } = await client
+        const { data: docData, error: docErr } = await supabase
           .from('documents')
           .insert({
             project_id: newProject.id,
@@ -210,7 +247,7 @@ export async function POST(req: NextRequest) {
           .single()
         if (docErr || !docData) throw new Error(docErr?.message || 'Failed to create document')
 
-        const { data: revData, error: revErr } = await client
+        const { data: revData, error: revErr } = await supabase
           .from('document_revisions')
           .insert({
             document_id: docData.id,
@@ -224,9 +261,9 @@ export async function POST(req: NextRequest) {
           .single()
         if (revErr || !revData) throw new Error(revErr?.message || 'Failed to create revision')
 
-        await client.from('documents').update({ current_revision_id: revData.id }).eq('id', docData.id)
+        await supabase.from('documents').update({ current_revision_id: revData.id }).eq('id', docData.id)
 
-        await client.from('document_versions').insert({
+        await supabase.from('document_versions').insert({
           document_id: docData.id,
           revision_id: revData.id,
           version_no: 1,
@@ -414,14 +451,13 @@ ${m.additional_notes || '—'}
     await generateDocument('Technical Architecture', `${clientName} - Software Requirements Specification (SRS)`, generateSRS(meeting, { name: clientName }))
     await generateDocument('Handover Dossier', `${clientName} - Developer Handover Document`, generateHandover(meeting, { name: clientName }))
 
-    await client.from('readiness_checks').upsert({
+    await supabase.from('readiness_checks').upsert({
       project_id: newProject.id,
       run_by: user.id,
       result: 'pending',
     }, { onConflict: 'project_id' })
 
-    await client.from('audit_entries').insert({
-      actor_user_id: user.id,
+    await writeAudit(supabase, {
       action: 'discovery_meeting.documents_generated',
       entity_type: 'discovery_meeting',
       entity_id: meetingId,
@@ -439,8 +475,7 @@ ${m.additional_notes || '—'}
       discoveryMeeting: { id: meetingId, status: 'approved', client_id: clientId },
       documents: docGenerationResults,
     })
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'Internal server error'
-    return NextResponse.json({ error: msg }, { status: 500 })
+  } catch (err: any) {
+    return NextResponse.json({ error: err.message || 'Internal server error' }, { status: 500 })
   }
 }

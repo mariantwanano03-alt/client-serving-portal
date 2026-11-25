@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { writeAudit } from '@/lib/audit'
 import { createClient } from '@supabase/supabase-js'
 import { supabase } from '@/lib/supabase'
+import { denyBusinessOperation } from '@/lib/authz'
 
 function getAuthenticatedClient(req: NextRequest) {
   const authHeader = req.headers.get('authorization')
@@ -22,6 +24,8 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const denied = await denyBusinessOperation(req)
+  if (denied) return denied
   try {
     const { id } = await params
     const client = getAuthenticatedClient(req)
@@ -42,8 +46,8 @@ export async function POST(
       return NextResponse.json({ error: 'Could not load user profile.' }, { status: 401 })
     }
 
-    // Staff can send documents
-    if (!['senior_dev_pm', 'administrator'].includes(profile.role)) {
+    // Only senior staff can send documents; administrators are read-only.
+    if (profile.role !== 'senior_dev_pm') {
       return NextResponse.json({ error: 'Not authorized.' }, { status: 403 })
     }
 
@@ -87,20 +91,23 @@ export async function POST(
       return NextResponse.json({ error: 'Client not found.' }, { status: 404 })
     }
 
-    const clientEmail = clientData.email || clientData.primary_contact
+    // primary_contact is a person's name, not an email address. Never use it
+    // as a delivery recipient, and never trust a caller-supplied status.
+    const clientEmail = typeof clientData.email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clientData.email)
+      ? clientData.email
+      : null
     if (!clientEmail) {
       return NextResponse.json(
-        { error: 'Client has no email address on file.' },
+        { error: 'Client has no valid email address on file.' },
         { status: 400 }
       )
     }
 
-    const deliveryStatus = body.delivery_status || 'sent'
-    const errorMessage = body.error_message || null
+    const deliveryStatus = 'sent'
+    const errorMessage = null
 
     // Record the delivery in audit log
-    await client.from('audit_entries').insert({
-      actor_user_id: user.id,
+    await writeAudit(client, {
       action: 'document.sent_to_client',
       entity_type: 'document',
       entity_id: id,

@@ -1,34 +1,36 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { supabase } from '@/lib/supabase'
-
-// Helper: get an authenticated supabase client from the request
-function getAuthenticatedClient(req: NextRequest) {
-  const authHeader = req.headers.get('authorization')
-  if (authHeader?.startsWith('Bearer ')) {
-    const token = authHeader.slice(7)
-    return createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!,
-      { global: { headers: { Authorization: `Bearer ${token}` } } }
-    )
-  }
-  return supabase
-}
+import { denyBusinessOperation } from '@/lib/authz'
 
 // ─── POST /api/discovery/start ───────────────────────────────────────────
 // Start a new discovery meeting (pre-client record).
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
+  const denied = await denyBusinessOperation(req)
+  if (denied) return denied
   try {
-    const client = getAuthenticatedClient(req)
-
-    const { data: { user }, error: userError } = await client.auth.getUser()
-
-    if (userError || !user) {
-      return NextResponse.json({ error: 'Not authenticated.' }, { status: 401 })
+    // 1. Get token from Authorization header
+    const authHeader = req.headers.get('Authorization')
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return NextResponse.json({ error: 'Missing or invalid Authorization header' }, { status: 401 })
     }
 
-    const { data: profile, error: profileError } = await client
+    const token = authHeader.replace('Bearer ', '')
+
+    // 2. Create a standard Supabase client with the user's token
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+      { global: { headers: { Authorization: `Bearer ${token}` } } }
+    )
+
+    // 3. Verify the user
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
+
+    if (authError || !user) {
+      return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+    }
+
+    const { data: profile, error: profileError } = await supabase
       .from('profiles')
       .select('role, is_active')
       .eq('id', user.id)
@@ -38,8 +40,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Could not load user profile.' }, { status: 401 })
     }
 
-    // Staff can start discovery meetings
-    if (!['senior_dev_pm', 'junior_developer', 'administrator'].includes(profile.role)) {
+    // Staff (never administrators) can start discovery meetings
+    if (!['senior_dev_pm', 'junior_developer'].includes(profile.role) || profile.is_active === false) {
       return NextResponse.json(
         { error: 'Only staff members can start discovery meetings.' },
         { status: 403 }
@@ -74,19 +76,18 @@ export async function POST(req: NextRequest) {
       created_by: user.id,
     }
 
-    const { data, error } = await client
+    const { data, error: dbError } = await supabase
       .from('discovery_meetings')
       .insert(meetingData)
       .select()
       .single()
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 })
+    if (dbError) {
+      return NextResponse.json({ error: dbError.message }, { status: 500 })
     }
 
     return NextResponse.json({ data }, { status: 201 })
   } catch (err: any) {
-    console.error('Discovery start failed:', err)
     return NextResponse.json({ error: err.message || 'Internal server error' }, { status: 500 })
   }
 }

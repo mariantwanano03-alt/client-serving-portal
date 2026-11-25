@@ -1,8 +1,19 @@
+import PortalShell from '@/components/PortalShell'
 import ProjectWorkspace from './ProjectWorkspace'
 
-export const instant = false
-
-export default async function ProjectDetailPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function ProjectDetailPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>
+  searchParams: Promise<{ tab?: string | string[] }>
+}) {
   const { id } = await params
-  return <ProjectWorkspace id={id} />
+  const { tab } = await searchParams
+
+  return (
+    <PortalShell title="Project Workspace" breadcrumb="WORKSPACE / PROJECTS / WORKSPACE">
+      <ProjectWorkspace id={id} initialTab={typeof tab === 'string' ? tab : undefined} />
+    </PortalShell>
+  )
 }

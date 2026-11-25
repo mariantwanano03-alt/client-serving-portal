@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { writeAudit } from '@/lib/audit'
 import { createClient } from '@supabase/supabase-js'
 import { supabase } from '@/lib/supabase'
+import { denyBusinessOperation } from '@/lib/authz'
 
 // Helper: get an authenticated supabase client from the request
 function getAuthenticatedClient(req: NextRequest) {
@@ -18,6 +20,8 @@ function getAuthenticatedClient(req: NextRequest) {
 
 // ─── GET /api/discovery-meetings ───────────────────────────────────────────
 export async function GET(req: NextRequest) {
+  const denied = await denyBusinessOperation(req)
+  if (denied) return denied
   try {
     const client = getAuthenticatedClient(req)
     const { data, error } = await client.from('discovery_meetings').select('*').order('created_at', { ascending: false })
@@ -35,6 +39,8 @@ export async function GET(req: NextRequest) {
 
 // ─── POST /api/discovery-meetings ──────────────────────────────────────────
 export async function POST(req: NextRequest) {
+  const denied = await denyBusinessOperation(req)
+  if (denied) return denied
   try {
     const client = getAuthenticatedClient(req)
     const body = await req.json()
@@ -62,7 +68,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Could not load user profile.' }, { status: 401 })
     }
 
-    const allowedRoles = ['senior_dev_pm', 'junior_developer', 'administrator']
+    const allowedRoles = ['senior_dev_pm', 'junior_developer']
     if (!allowedRoles.includes(profile.role)) {
       return NextResponse.json(
         { error: 'Only staff members can create discovery meetings.' },
@@ -99,8 +105,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
 
-    await client.from('audit_entries').insert({
-      actor_user_id: user.id,
+    await writeAudit(client, {
       action: 'discovery_meeting.created',
       entity_type: 'discovery_meeting',
       entity_id: data.id,

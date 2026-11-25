@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { writeAudit } from '@/lib/audit'
 import { createClient } from '@supabase/supabase-js'
 import { supabase } from '@/lib/supabase'
+import { getSupabaseAdmin } from '@/lib/supabaseAdmin'
+import { ALL_ROLES, denyBusinessOperation, requireRole } from '@/lib/authz'
 
 function getAuthenticatedClient(req: NextRequest) {
   const authHeader = req.headers.get('authorization')
@@ -18,6 +21,12 @@ function getAuthenticatedClient(req: NextRequest) {
 // ─── GET /api/projects ───────────────────────────────────────────────────────
 // List projects with client info. Supports filtering by client.
 export async function GET(req: NextRequest) {
+  const denied = await requireRole(
+    req,
+    ALL_ROLES,
+    'You do not have permission to view projects.'
+  )
+  if (denied) return denied
   try {
     const client = getAuthenticatedClient(req)
     const { searchParams } = new URL(req.url)
@@ -32,9 +41,6 @@ export async function GET(req: NextRequest) {
         description,
         stage,
         status,
-        is_provisional,
-        client_creation_status,
-        discovery_meeting_id,
         created_at,
         clients(client_code, name, email, primary_contact)
       `)
@@ -58,10 +64,11 @@ export async function GET(req: NextRequest) {
 }
 
 // ─── POST /api/projects ──────────────────────────────────────────────────────
-// Create a new project. Two modes:
-//   - existing client: provide client_id
-//   - new client: omit client_id, creates a provisional project for discovery workflow
+// Create a new project for an existing client. Discovery-led creation goes
+// through /api/discovery/approve, which creates the client first.
 export async function POST(req: NextRequest) {
+  const denied = await denyBusinessOperation(req)
+  if (denied) return denied
   try {
     const client = getAuthenticatedClient(req)
     const body = await req.json()
@@ -81,61 +88,73 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Could not load user profile.' }, { status: 401 })
     }
 
-    // Only senior_dev_pm and administrator can create projects
-    if (!['senior_dev_pm', 'administrator'].includes(profile.role)) {
+    // Administrators are explicitly excluded — oversight role only.
+    if (!['senior_dev_pm', 'junior_developer'].includes(profile.role) || profile.is_active === false) {
       return NextResponse.json(
-        { error: 'Only Senior Developers / PMs and Administrators can create projects.' },
+        { error: 'Only active Senior Developers / PMs and Developers can create projects.' },
         { status: 403 }
       )
     }
 
-    const { client_id, name, description, discovery_meeting_id } = body
+    const { client_id, name, description } = body
 
     if (!name?.trim()) {
       return NextResponse.json({ error: 'Project name is required.' }, { status: 400 })
+    }
+    if (!client_id) {
+      return NextResponse.json({ error: 'An existing client is required.' }, { status: 400 })
     }
 
     // Generate a unique project reference
     const projectRef = `PRJ-${Date.now().toString(36).toUpperCase()}`
 
-    const isProvisional = !client_id
-    const clientCreationStatus = isProvisional ? 'pending' : 'not_required'
+    // INSERT ... RETURNING evaluates the scoped SELECT policy before the
+    // creator's AFTER INSERT assignment can be read back. Insert with the
+    // caller's client so RLS still enforces who may create, then read the
+    // committed row through the service-role client for the response.
+    const { error: insertError } = await client.from('projects').insert({
+      project_reference: projectRef,
+      client_id,
+      name: name.trim(),
+      description: description?.trim() || null,
+      stage: 'create_project',
+      status: 'draft',
+      created_by: user.id,
+    })
+    if (insertError) {
+      return NextResponse.json({ error: insertError.message }, { status: 500 })
+    }
 
-    const { data, error } = await client
+    const admin = getSupabaseAdmin()
+    const { data, error } = await admin
       .from('projects')
-      .insert({
-        project_reference: projectRef,
-        client_id: client_id || null,
-        name: name.trim(),
-        description: description?.trim() || null,
-        stage: 'create_project',
-        status: 'draft',
-        is_provisional: isProvisional,
-        client_creation_status: clientCreationStatus,
-        discovery_meeting_id: discovery_meeting_id || null,
-        created_by: user.id,
-      })
       .select(`
         *,
         clients(client_code, name, email, primary_contact)
       `)
-      .single()
+      .eq('project_reference', projectRef)
+      .eq('created_by', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 })
+    if (error || !data) {
+      return NextResponse.json(
+        { error: error?.message || 'Could not load the created project.' },
+        { status: 500 }
+      )
     }
 
     // Audit entry
-    await client.from('audit_entries').insert({
-      actor_user_id: user.id,
-      action: isProvisional ? 'project.created_provisional' : 'project.created',
+    await writeAudit(client, {
+      action: 'project.created',
       entity_type: 'project',
       entity_id: data.id,
       after_value: {
         project_reference: data.project_reference,
         name: data.name,
         client_id: data.client_id,
-        is_provisional: data.is_provisional,
+        source: 'existing_client',
       },
     })
 

@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { supabase } from '@/lib/supabase'
+import { getSupabaseAdmin } from '@/lib/supabaseAdmin'
+import { ALL_ROLES, requireRole } from '@/lib/authz'
 
 function getAuthenticatedClient(req: NextRequest) {
   const authHeader = req.headers.get('authorization')
@@ -21,6 +23,12 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const denied = await requireRole(
+    req,
+    ALL_ROLES,
+    'You do not have permission to view project documents.'
+  )
+  if (denied) return denied
   try {
     const { id } = await params
     const client = getAuthenticatedClient(req)
@@ -30,17 +38,10 @@ export async function GET(
       return NextResponse.json({ error: 'Not authenticated.' }, { status: 401 })
     }
 
-    // Get document with latest revision content
+    // Get the document and its newest revision (the editable source).
     const { data: document, error: docError } = await client
       .from('documents')
-      .select(`
-        id,
-        title,
-        type,
-        status,
-        project_id,
-        document_revisions:document_revisions_document_id_fkey(*)
-      `)
+      .select('id, title, type, status, project_id, current_revision_id')
       .eq('id', id)
       .single()
 
@@ -48,13 +49,17 @@ export async function GET(
       return NextResponse.json({ error: 'Document not found.' }, { status: 404 })
     }
 
-    const revisions = (document as unknown as { document_revisions?: { content?: string | null }[] }).document_revisions || []
-    const latestRev = revisions.length > 0 ? revisions[0] : null
-    const content = latestRev?.content || null
+    const { data: revisions } = await client
+      .from('document_revisions')
+      .select('id, revision_no, content, storage_ref, uploaded_file_path, uploaded_file_name, uploaded_mime_type')
+      .eq('document_id', id)
+      .order('revision_no', { ascending: false })
 
-    if (!content) {
-      return NextResponse.json({ error: 'Document has no content to download.' }, { status: 400 })
-    }
+    const latestRev =
+      revisions?.find((revision) => revision.id === document.current_revision_id) ||
+      revisions?.[0] ||
+      null
+    const content = latestRev?.content || null
 
     // Get project and client info for filename
     const { data: project } = await client
@@ -79,6 +84,35 @@ export async function GET(
     const safeClientName = clientName.replace(/[^a-z0-9]/gi, '_').toLowerCase()
     const docType = document.type?.replace(/[^a-z0-9]/gi, '_').toLowerCase() || 'document'
     const fileName = `${safeClientName}_${docType}.pdf`
+
+    // Uploaded binary documents keep their stored file. PDFs are returned
+    // directly; text/markdown files are rendered into a new PDF below.
+    if (!content && latestRev?.uploaded_file_path) {
+      const admin = getSupabaseAdmin()
+      const bucket = latestRev.storage_ref?.split('/')[0] || 'document-uploads'
+      const { data: storedFile, error: storedError } = await admin.storage
+        .from(bucket)
+        .download(latestRev.uploaded_file_path)
+      if (storedError || !storedFile) {
+        return NextResponse.json(
+          { error: storedError?.message || 'Stored document could not be downloaded.' },
+          { status: 500 }
+        )
+      }
+      const mime = latestRev.uploaded_mime_type || 'application/pdf'
+      const extension = mime.includes('word') ? '.docx' : '.pdf'
+      return new NextResponse(await storedFile.arrayBuffer(), {
+        status: 200,
+        headers: {
+          'Content-Type': mime,
+          'Content-Disposition': `attachment; filename="${fileName.replace(/\.pdf$/, extension)}"`,
+        },
+      })
+    }
+
+    if (!content) {
+      return NextResponse.json({ error: 'Document has no content to download.' }, { status: 400 })
+    }
 
     // Generate PDF using jspdf (server-side via dynamic import)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -170,7 +204,7 @@ export async function GET(
       pdf.setFontSize(9)
       pdf.setFont('helvetica', 'normal')
       pdf.setTextColor(150, 150, 150)
-      pdf.text(`ClientFlow · Client Serving Portal`, margin, pageHeight - 20)
+      pdf.text(`Client Serving Portal · X Spark`, margin, pageHeight - 20)
       pdf.text(`Page ${i} of ${totalPages}`, pageWidth - margin - 30, pageHeight - 20)
     }
 

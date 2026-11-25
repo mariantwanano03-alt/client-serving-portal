@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { writeAudit } from '@/lib/audit'
 import { createClient } from '@supabase/supabase-js'
 import { supabase } from '@/lib/supabase'
+import { denyBusinessOperation } from '@/lib/authz'
 
 function getAuthenticatedClient(req: NextRequest) {
   const authHeader = req.headers.get('authorization')
@@ -16,11 +18,13 @@ function getAuthenticatedClient(req: NextRequest) {
 }
 
 // ─── POST /api/documents/[id]/approve ────────────────────────────────────────
-// Approve or reject a document version. Only senior_dev_pm and administrator.
+// Approve or reject a document version. Only senior_dev_pm (admins are read-only).
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const denied = await denyBusinessOperation(req)
+  if (denied) return denied
   try {
     const { id } = await params
     const client = getAuthenticatedClient(req)
@@ -41,9 +45,9 @@ export async function POST(
       return NextResponse.json({ error: 'Could not load user profile.' }, { status: 401 })
     }
 
-    if (!['senior_dev_pm', 'administrator'].includes(profile.role)) {
+    if (profile.role !== 'senior_dev_pm') {
       return NextResponse.json(
-        { error: 'Only Senior Developers / PMs and Administrators can approve documents.' },
+        { error: 'Only Senior Developers / PMs can approve documents.' },
         { status: 403 }
       )
     }
@@ -63,6 +67,22 @@ export async function POST(
 
     if (docError || !document) {
       return NextResponse.json({ error: 'Document not found.' }, { status: 404 })
+    }
+
+    // Senior role alone is not enough: the assignment matrix must grant this
+    // senior approval authority on the specific project.
+    // can_approve_document reads auth.uid(), so it must run with the caller's
+    // JWT rather than the service-role key.
+    const { data: mayApprove, error: authorityError } = await client
+      .rpc('can_approve_document', { p_document_id: id })
+    if (authorityError) {
+      return NextResponse.json({ error: authorityError.message }, { status: 500 })
+    }
+    if (!mayApprove) {
+      return NextResponse.json(
+        { error: 'You are not authorised to approve documents on this project.' },
+        { status: 403 }
+      )
     }
 
     const revId = revision_id || document.current_revision_id
@@ -99,18 +119,25 @@ export async function POST(
       return NextResponse.json({ error: approvalError.message }, { status: 500 })
     }
 
-    // Update revision status
-    await client
+    // Update revision status. The existing sync trigger mirrors this onto the
+    // document, and the approval triggers reject any status write that did not
+    // go through an approval record.
+    const { error: revisionUpdateError } = await client
       .from('document_revisions')
       .update({ status: decision })
       .eq('id', revId)
+    if (revisionUpdateError) {
+      return NextResponse.json({ error: revisionUpdateError.message }, { status: 500 })
+    }
 
-    // Update document status
     const newDocStatus = decision === 'approved' ? 'approved' : 'rejected'
-    await client
+    const { error: documentUpdateError } = await client
       .from('documents')
       .update({ status: newDocStatus })
       .eq('id', id)
+    if (documentUpdateError) {
+      return NextResponse.json({ error: documentUpdateError.message }, { status: 500 })
+    }
 
     // Record document version snapshot
     const { data: revData } = await client
@@ -142,8 +169,7 @@ export async function POST(
     }
 
     // Audit entry
-    await client.from('audit_entries').insert({
-      actor_user_id: user.id,
+    await writeAudit(client, {
       action: `document.${decision}`,
       entity_type: 'document',
       entity_id: id,

@@ -33,6 +33,18 @@ create table projects (
   created_at timestamptz not null default now()
 );
 
+-- Allow all authenticated users to insert clients
+create policy "Allow authenticated insert clients"
+  on clients for insert
+  to authenticated
+  with check (true);
+
+-- Allow all authenticated users to insert projects
+create policy "Allow authenticated insert projects"
+  on projects for insert
+  to authenticated
+  with check (true);
+
 -- Lock the tables down until we add access rules for each role
 alter table profiles enable row level security;
 alter table clients enable row level security;
